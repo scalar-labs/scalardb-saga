@@ -13,6 +13,7 @@ import java.net.http.HttpRequest.BodyPublishers;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.nio.file.Path;
+import java.util.Objects;
 import java.util.Properties;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
@@ -104,6 +105,10 @@ class SagaTccAsyncCallbackIntegrationTest extends ServerIntegrationTestSupport {
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, String.valueOf(daemonPort));
     props.setProperty(SagaServerConfig.CALLBACK_BASE_URL_KEY, "http://localhost:" + daemonPort);
     props.setProperty(SagaServerConfig.CALLBACK_SECRET_KEY, SECRET);
+    // See the note in SagaAsyncCallbackIntegrationTest: a parked saga runs the synchronous start's
+    // wait to its bound, so the default 60s is a minute per test spent proving a status. See
+    // todos/105.
+    props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "2000");
   }
 
   @Test
@@ -116,9 +121,9 @@ class SagaTccAsyncCallbackIntegrationTest extends ServerIntegrationTestSupport {
 
     // The callback URL is keyed on the phase-qualified reserve name, matching the parked marker —
     // a bare "s1" here would fail to resolve to the parked "s1.reserve" step.
-    String callbackUrl = reserveCallbackUrl.get();
+    String callbackUrl =
+        Objects.requireNonNull(reserveCallbackUrl.get(), "the participant was never called");
     assertThat(callbackUrl)
-        .isNotNull()
         .contains("/sagas/" + sagaId + "/steps/s1.reserve/complete?token=")
         .contains("&iat=");
 
@@ -142,9 +147,9 @@ class SagaTccAsyncCallbackIntegrationTest extends ServerIntegrationTestSupport {
     assertThat(hits("/reserve-sync")).isEqualTo(1);
 
     // The callback URL is keyed on the phase-qualified confirm name, matching the parked marker.
-    String callbackUrl = confirmCallbackUrl.get();
+    String callbackUrl =
+        Objects.requireNonNull(confirmCallbackUrl.get(), "the participant was never called");
     assertThat(callbackUrl)
-        .isNotNull()
         .contains("/sagas/" + sagaId + "/steps/s1.confirm/complete?token=")
         .contains("&iat=");
 

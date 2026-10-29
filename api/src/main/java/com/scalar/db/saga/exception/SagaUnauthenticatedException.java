@@ -12,13 +12,20 @@ import java.util.Objects;
  */
 public class SagaUnauthenticatedException extends SagaRuntimeException {
 
-  public SagaUnauthenticatedException(String message) {
-    super(Objects.requireNonNull(message, "message must not be null"));
+  /** The request presented no valid credential, with no transport status to attach as the cause. */
+  public SagaUnauthenticatedException() {
+    super(SagaErrorCode.UNAUTHENTICATED, ErrorMetadata.of());
   }
 
-  public SagaUnauthenticatedException(String message, Throwable cause) {
+  /**
+   * The request presented no valid credential.
+   *
+   * @param cause the transport status that reported it
+   */
+  public SagaUnauthenticatedException(Throwable cause) {
     super(
-        Objects.requireNonNull(message, "message must not be null"),
+        SagaErrorCode.UNAUTHENTICATED,
+        ErrorMetadata.of(),
         Objects.requireNonNull(cause, "cause must not be null"));
   }
 }

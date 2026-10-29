@@ -6,11 +6,12 @@ import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.engine.OperatorContext;
+import com.scalar.db.saga.exception.SagaInvalidRequestException;
 import com.scalar.db.saga.server.security.SagaIdentity;
 import com.scalar.db.saga.server.security.SagaOperation;
 import com.scalar.db.saga.server.security.SagaSecurityHandler;
-import io.javalin.Javalin;
 import io.javalin.http.Context;
+import io.javalin.router.JavalinDefaultRoutingApi;
 
 /**
  * Registers the Admin API REST endpoints — the operational control plane over the daemon's saga
@@ -52,28 +53,30 @@ public final class SagaAdminResource {
   private SagaAdminResource() {}
 
   /**
-   * Registers the admin routes on the given app.
+   * Registers the admin routes on the given routing configuration.
    *
-   * @param app the Javalin app
+   * @param routes the routing configuration the server is created with
    * @param orchestrator the orchestrator whose admin control plane the endpoints drive
    * @param driveDeadlineMillis the bound on a single-saga inline drive ({@code 0} = unbounded)
    */
   public static void register(
-      Javalin app, DefaultSagaOrchestrator orchestrator, long driveDeadlineMillis) {
-    app.get("/sagas", ctx -> list(ctx, orchestrator), SagaOperation.LIST_SAGAS);
-    app.post(
+      JavalinDefaultRoutingApi routes,
+      DefaultSagaOrchestrator orchestrator,
+      long driveDeadlineMillis) {
+    routes.get("/sagas", ctx -> list(ctx, orchestrator), SagaOperation.LIST_SAGAS);
+    routes.post(
         "/sagas/{id}/recover",
         ctx -> recover(ctx, orchestrator, driveDeadlineMillis),
         SagaOperation.RECOVER_SAGA);
-    app.post(
+    routes.post(
         "/sagas/{id}/force-complete",
         ctx -> forceComplete(ctx, orchestrator, driveDeadlineMillis),
         SagaOperation.FORCE_COMPLETE);
-    app.post(
+    routes.post(
         "/sagas/{id}/reset",
         ctx -> reset(ctx, orchestrator, driveDeadlineMillis),
         SagaOperation.RESET_ESCALATED);
-    app.post(
+    routes.post(
         "/admin/reset-escalated",
         ctx -> bulkReset(ctx, orchestrator, driveDeadlineMillis),
         SagaOperation.RESET_ESCALATED);
@@ -156,45 +159,46 @@ public final class SagaAdminResource {
     try {
       request = ctx.bodyAsClass(type);
     } catch (Exception e) {
-      throw new InvalidRequestException("malformed request body");
+      throw new SagaInvalidRequestException("malformed request body");
     }
     // A body of the JSON null literal deserializes to null without throwing; reject it cleanly.
     if (request == null) {
-      throw new InvalidRequestException("request body must not be null");
+      throw new SagaInvalidRequestException("request body must not be null");
     }
     return request;
   }
 
   private static SagaQuery parseQuery(Context ctx) {
-    SagaQuery.Builder builder = SagaQuery.newBuilder();
-    String status = ctx.queryParam("status");
-    if (status != null) {
-      builder.status(parseStatus(status));
-    }
-    String updatedAfter = ctx.queryParam("updatedAfter");
-    if (updatedAfter != null) {
-      builder.updatedAfter(RequestParsing.parseInstant(updatedAfter, "updatedAfter"));
-    }
-    String updatedBefore = ctx.queryParam("updatedBefore");
-    if (updatedBefore != null) {
-      builder.updatedBefore(RequestParsing.parseInstant(updatedBefore, "updatedBefore"));
-    }
-    String pageSize = ctx.queryParam("pageSize");
-    if (pageSize != null) {
-      builder.pageSize(parsePageSize(pageSize)); // out-of-range -> IllegalArgumentException -> 400
-    }
-    String pageToken = ctx.queryParam("pageToken");
-    if (pageToken != null) {
-      builder.pageToken(pageToken);
-    }
-    return builder.build(); // an empty updatedAt window -> IllegalArgumentException -> 400
+    return RequestParsing.buildQuery(
+        params -> {
+          String status = ctx.queryParam("status");
+          if (status != null) {
+            params.status(parseStatus(status));
+          }
+          String updatedAfter = ctx.queryParam("updatedAfter");
+          if (updatedAfter != null) {
+            params.updatedAfter(RequestParsing.parseInstant(updatedAfter, "updatedAfter"));
+          }
+          String updatedBefore = ctx.queryParam("updatedBefore");
+          if (updatedBefore != null) {
+            params.updatedBefore(RequestParsing.parseInstant(updatedBefore, "updatedBefore"));
+          }
+          String pageSize = ctx.queryParam("pageSize");
+          if (pageSize != null) {
+            params.pageSize(parsePageSize(pageSize));
+          }
+          String pageToken = ctx.queryParam("pageToken");
+          if (pageToken != null) {
+            params.pageToken(pageToken);
+          }
+        });
   }
 
   private static SagaStatus parseStatus(String value) {
     try {
       return SagaStatus.valueOf(value);
     } catch (IllegalArgumentException e) {
-      throw new InvalidRequestException("'status' is not a valid saga status");
+      throw new SagaInvalidRequestException("'status' is not a valid saga status");
     }
   }
 
@@ -202,7 +206,7 @@ public final class SagaAdminResource {
     try {
       return Integer.parseInt(value);
     } catch (NumberFormatException e) {
-      throw new InvalidRequestException("'pageSize' is not an integer");
+      throw new SagaInvalidRequestException("'pageSize' is not an integer");
     }
   }
 }

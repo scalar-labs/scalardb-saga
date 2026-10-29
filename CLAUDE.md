@@ -6,8 +6,8 @@ Refer to `~/git/scalardb-saga-design/docs/scalardb-saga-design.md` for architect
 
 ## Language
 
-- **Java 21** for all modules (core engine, framework integrations, daemon, testing, dev server, etc.)
-- **Java 8** only for the daemon client SDK (`scalardb-saga-java-client-sdk`) to maximize adoption
+- **Java 25** for the engine and everything that runs it (core engine, framework integrations, daemon, testing, dev server, etc.) — JEP 491 (JDK 24) removes the virtual-thread carrier pinning that otherwise caps database concurrency at the carrier count
+- **Java 8** for the published SDK surface (`api`, `rpc`, `client`) to maximize adoption
 - Users on Java 8 use daemon mode via client SDK or call HTTP/gRPC endpoints directly
 
 ## Build
@@ -15,11 +15,14 @@ Refer to `~/git/scalardb-saga-design/docs/scalardb-saga-design.md` for architect
 - **Gradle 9.x with Kotlin DSL** (`build.gradle.kts`)
 - Format apply: `./gradlew spotlessApply`
 - Check (test + format + static analysis): `./gradlew check`
-- Check for compiler warnings (hidden when cached): `./gradlew clean compileTestJava --no-build-cache`
-- **Always run all three in order (`spotlessApply` → `check` → `clean compileTestJava --no-build-cache`) before confirming code changes are OK**
+- Check for compiler warnings (hidden when cached): `./gradlew clean compileTestJava compileTestFixturesJava compileIntegrationTestJava --no-build-cache`
+  - **Expected baseline: exactly 4 warnings** — `unknown enum constant ElementType.MODULE` twice each from `:api:compileJava` and `:client:compileJava`. The Java 8 modules carry jspecify annotations whose class files name the Java-9-only `MODULE` target, and javac has no switch to suppress the resulting note. They go away only if those modules ever leave Java 8. The count covers every Java source set: `main`, `test`, `testFixtures` and `integrationTest`. It does **not** cover `javadoc`, which `check` also runs with `-Werror` on every module, so a doclint warning anywhere fails the build outright rather than counting here. Any warning beyond these 4 is new and must be fixed.
+- **Always run all three in order (`spotlessApply` → `check` → `clean compileTestJava compileTestFixturesJava compileIntegrationTestJava --no-build-cache`) before confirming code changes are OK**
+- Gradle's exit status is lost through a pipe (`./gradlew check | tail` reports tail's status, so `&&` chains continue past a failed build) — redirect to a file with `>|` (plain `>` is blocked by zsh noclobber) and test `$?` before committing
 - **Convention plugins** in `build-logic/` — shared build logic lives here, not in `subprojects {}` / `allprojects {}`
 - **Version catalog** in `gradle/libs.versions.toml` — single source of truth for dependency versions
 - **Configuration cache** enabled (`org.gradle.configuration-cache=true`)
+- Integration tests run on a private SQLite file per test. `-Dscalardb.saga.integration_test.properties=<ScalarDB properties file>` (absolute, or relative to the repository root) points both suites at any other backend (`IntegrationTestStore` in `core`'s test fixtures; the file carries the same store keys a deployment would, such as `scalar.db.saga.store.scalardb.creation_options.no-scaling=true` for DynamoDB Local). Run `:core:integrationTest` and `:server:integrationTest` in **separate** invocations then: the configuration cache keeps task parallelism on regardless of `--no-parallel`, and two suites truncating one shared store wipe each other mid-test
 - New subprojects apply `id("scalardb-saga.java-conventions")` and declare only their specific dependencies
 
 ## Code Style
@@ -47,6 +50,17 @@ Refer to `~/git/scalardb-saga-design/docs/scalardb-saga-design.md` for architect
 - Public API classes use `Saga` prefix when the remainder is too generic to stand alone (e.g., `SagaManager`, `SagaContext`, `SagaStatus`). Domain-specific names that are already unambiguous within the package omit the prefix (e.g., `Step`, `StepResult`, `RetryPolicy`, `TccStep`).
 - Internal classes use domain-specific names without prefix (e.g., `CompensationManager`)
 
+## Error codes
+
+- `SagaErrorCode` (api) is the single wire vocabulary. Everything in it freezes at first release: code numbers, the USER_ERROR sub-ranges (`10Nxx` ↔ HTTP status family), and `WIRE_DOMAIN` (clients match it verbatim); metadata schemas may gain keys after release but never lose or rename one (clients drop unknown keys)
+- Adding a code: register it in `ExceptionRegistry`, add a row to the golden-table tests in both `GrpcErrorMapperTest` and `ErrorMapperTest`, and give it a `StatusCodeReference` entry (or list it in `RESERVED` if nothing produces it yet), then run `./gradlew :server:generateStatusCodes` and commit the page — the registry round-trip, sub-range guard, and `StatusCodesPageTest` tests fail the build otherwise
+- Every wire-facing error carries a code: gRPC interceptor refusals compose through `GrpcErrorMapper.close`, and REST's unmatched-route 404 goes through `ErrorMapper`'s `NotFoundResponse` handler — never close a call or write an error body outside the two mappers
+
+## Configuration keys
+
+- `scalar.db.saga.*` property keys freeze at first release, the same as `SagaErrorCode` and the Maven group: once a version ships every key lives in somebody's properties file, so renaming or removing one is a breaking change. Adding a key is compatible; renaming, removing, or repurposing one is not
+- The record components that mirror them (`RecoveryConfig`, `RetentionConfig`) freeze with the keys — a key and its component are one surface, so a name that does not say what it bounds has to be corrected before GA, not after
+
 ## Design Principles
 
 - Follow **SOLID** and **DRY**
@@ -60,6 +74,7 @@ Refer to `~/git/scalardb-saga-design/docs/scalardb-saga-design.md` for architect
 - Never use PowerMock — needing it indicates a design problem. Refactor instead.
 - **Co-locate unit tests with implementation** — write tests in the same task as the classes they test. Do not defer tests to a separate bulk task. Integration tests that span multiple classes may be a separate task.
 - **Test all public methods** — every public method must have at least one test. Important private methods should also be tested (via public API or package-private access).
+- **A test that can only ever pass is not coverage** — asserting a getter returns its constructor argument proves nothing and disguises a member with no real consumer. Treat such a test as a signal to delete the member, not as coverage of it.
 - **Cover both success and failure cases** — test normal (success) paths and abnormal (failure) paths. Failure cases should be covered **extensively** — they are where bugs hide. Include edge cases, invalid inputs, exception paths, concurrency errors, and timeout scenarios.
 - Test method naming: `methodName_condition_expectedResult()`
   - The condition must read as a scenario, not a method-overload label
@@ -98,7 +113,7 @@ See [RELEASING.md](RELEASING.md) for the release process.
 - **Maven group is `com.scalar-labs`**, not the Java package — set in `scalardb-saga.base-conventions`. Matches the other Scalar artifacts on Central; cannot change after the first release.
 - Published modules apply `id("scalardb-saga.publishing-conventions")` and **must set `description`** (Maven Central rejects a POM without one). The convention sets the `artifactId` explicitly — `base.archivesName` does not affect it.
 - The server is deliberately unpublished: it ships as a container image, so a jar on Central would be an artifact nobody consumes and everyone has to keep patched.
-- Snapshots publish from `main` and every release branch (`.github/workflows/release-snapshot.yml`); releases leave the Central deployment `VALIDATED` for a human to release, because a released version is immutable.
+- Snapshots publish from `main` and every release branch (`.github/workflows/release-snapshot.yml`): the jars to the Central snapshot repository and the multi-arch server image to `ghcr.io` as `<version>-SNAPSHOT`, unsigned; releases leave the Central deployment `VALIDATED` for a human to release, because a released version is immutable.
 
 ## Container image
 
@@ -117,7 +132,10 @@ See [server/docker/README.md](server/docker/README.md) for running it.
   - `image-arm64-native-test` — the same boot under QEMU on `linux/arm64`, asserting the `aarch_64` epoll native loads; only `linux-x86_64` arrives transitively, so nothing else catches a dropped classifier
   - Both smoke jobs boot from the shared fixture in `.github/smoke/`
 - **Release** (`release.yml`, on `v<major>.<minor>.<patch>` tags, with or without a pre-release suffix) — asserts the tag matches `gradle.properties` and that the tagged commit is on the release branch its version names, then publishes to Maven Central, pushes the multi-arch image, signs it, and creates the GitHub release
-- **Dependabot** (`.github/dependabot.yml`) — gradle (incl. the version catalog), github-actions, and the Dockerfile base-image digest
+- **Changelog** (`changelog.yml`, on every PR, re-run on title and label edits) — requires a changie entry on `feat:` and `fix:` PRs unless labelled `no-changelog`, and validates every pending entry; changie comes from `.github/actions/setup-changie`, pinned by version and checksum, which Dependabot cannot bump. See [Changelog](#changelog)
+- **GHCR cleanup** (`ghcr-cleanup.yml`, weekly) — deletes untagged `ghcr.io` versions a moving snapshot tag leaves behind, via `snok/container-retention-policy`, which spares the children of every still-tagged multi-arch index. Never swap in a plain "delete untagged" action: a release's platform and attestation manifests are untagged too, and deleting them breaks the release. The snok container is pinned by digest, which Dependabot cannot update (it skips `docker://` references); bump it by hand as the workflow comment describes
+- **Dependabot** (`.github/dependabot.yml`) — gradle (incl. the version catalog), github-actions, and the Dockerfile base-image digest. Gradle and docker target `main` only; release lines receive those bumps as Auto-PR backports. Only github-actions has per-release-branch `target-branch` entries (workflow files drift between lines). Every github-actions entry lists `/.github/actions/*` beside `/`, because `/` covers only `.github/workflows`; the composite `push-server-image` action, shared by `release.yml` and `release-snapshot.yml`, would otherwise never be bumped.
+- **Auto-PR** (`.github/workflows/auto-pr.yml`) — on merge into `main` or a version branch, opens cherry-pick backport PRs on every line named by a family-shared "ScalarDB <version>" GitHub project attached to the merged PR (projects are shared across the ScalarDB family; consumers scope by repository) (shared `scalar-labs/actions` reusable workflow; conflicting cherry-picks become draft PRs with instructions)
   - Dependabot resolves against Maven Central only: it reads repositories from the root build file and root settings, never from `build-logic`'s own block. The `repositories {}` block in `build.gradle.kts` is therefore load-bearing despite resolving nothing at build time — it is what makes the portal-only Error Prone, NullAway, SpotBugs, and license-report plugins visible. Deleting it freezes them silently.
   - Every `[versions]` key needs a `[libraries]` entry pointing at it with `version.ref`, even one nothing resolves (see `junit-jupiter`). Dependabot reads only `[libraries]` and `[plugins]`; a version consumed solely as `libs.versions.<name>.get()` interpolation is one it cannot map to a module, so it never bumps it. Consume plugin coordinates in `build-logic` through catalog accessors, not interpolated strings.
 
@@ -126,6 +144,16 @@ See [server/docker/README.md](server/docker/README.md) for running it.
 - **Trunk-based development with release branches** — every change lands on `main` first; releases are cut from minor version branches (`1.0`, `1.1`), never from `main`. Fixes are backported down the lines, never merged up. See [RELEASING.md](RELEASING.md).
 - Branches are named after the version they carry, with no prefix — major version branch `1`, minor version branch `1.0` — so they match the `[0-9]+` and `[0-9]+.[0-9]+` patterns every workflow keys off. A patch is a tag, not a branch.
 - **Conventional Commits** (e.g., `feat: add saga engine`, `fix: handle timeout`)
+
+## Changelog
+
+The flow, for people and agents alike, is in [RELEASING.md](RELEASING.md#changelog). In short:
+
+- **A user-facing pull request adds a changie entry; never edit `CHANGELOG.md` or `.changes/v*.md` in a feature PR.** After opening the PR, run `changie new --interactive=false --kind <enhancement|improvement|bugfix> --custom PR=<number> --body "<what users see>"` and commit the file it writes to `.changes/unreleased/`. If changie is not installed, write that YAML file by hand in the form RELEASING.md shows (`kind`, `body`, `time`, `custom.PR`), named `<kind>-<yyyyMMdd-HHmmss.SSSSSS>.yaml`, and single-quote the body: an unquoted `[BREAKING] ...` parses as a YAML list, which fails the `Changelog` workflow
+- The body says what users see, not how the code changed; start it with `[BREAKING]` when users have to change their code, configuration, or deployment. A change of two kinds gets two entries
+- A change users cannot see (refactor, tests, CI, docs) gets the `no-changelog` label and no entry. The `Changelog` workflow fails a `feat:` or `fix:` PR with neither
+- A backport carries its entry by cherry-pick; add nothing to it
+- At release, `changie batch v<version>` then `changie merge`: a minor on the branch its release branch is cut from (`main`, or the major version branch once one exists) before the cut, a patch on its release branch, a major on `main`. `verify-version` refuses a release tag without `.changes/v<version>.md`, or with entries still pending, before anything is published
 
 ## TODO
 

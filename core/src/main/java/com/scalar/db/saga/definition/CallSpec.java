@@ -51,7 +51,11 @@ public abstract sealed class CallSpec permits HttpCall {
   // Package-private constructor: the permitted subtypes all live in this package.
   CallSpec() {}
 
-  /** The wire transport this call uses — the discriminator persisted with the definition. */
+  /**
+   * The wire transport this call uses — the discriminator persisted with the definition.
+   *
+   * @return the transport
+   */
   public abstract Transport transport();
 
   /**
@@ -61,12 +65,16 @@ public abstract sealed class CallSpec permits HttpCall {
    * <p>Used at build time to enforce that a compensating call does not depend on its own forward
    * step's output (which may not exist when the forward action failed) — see {@link
    * Step#compensate} / {@link TccStep#cancel}.
+   *
+   * @return the referenced keys, possibly empty
    */
   public abstract Set<String> referencedContextKeys();
 
   /**
    * The saga-context keys this call binds into the context from its response (its output mapping).
    * May be empty.
+   *
+   * @return the produced keys, possibly empty
    */
   public abstract Set<String> producedContextKeys();
 
@@ -76,6 +84,8 @@ public abstract sealed class CallSpec permits HttpCall {
    * returning it in the response. Meaningful only on a forward phase (execution / reservation /
    * confirmation) — a {@code ServiceStep} rejects an async backward-phase (compensation /
    * cancellation) call. Daemon-mode only; embedded mode always blocks until completion.
+   *
+   * @return {@code true} if the participant may answer through a later callback
    */
   public abstract boolean isAsync();
 
@@ -84,6 +94,8 @@ public abstract sealed class CallSpec permits HttpCall {
    * #isAsync()}), how long to wait for the external callback before the recovery sweeper times the
    * step out. {@code 0} means "wait indefinitely" — bounded only by the saga-level timeout. Ignored
    * for a non-async call.
+   *
+   * @return the callback deadline in milliseconds, or {@code 0} to wait indefinitely
    */
   public abstract long callbackTimeoutMillis();
 }

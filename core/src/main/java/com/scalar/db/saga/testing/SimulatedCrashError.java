@@ -9,6 +9,11 @@ package com.scalar.db.saga.testing;
  */
 public final class SimulatedCrashError extends Error {
 
+  /**
+   * Creates the error.
+   *
+   * @param message where the simulated crash happened
+   */
   public SimulatedCrashError(String message) {
     super(message);
   }

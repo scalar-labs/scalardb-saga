@@ -88,7 +88,7 @@ class SagaGrpcIntegrationTest extends ServerIntegrationTestSupport {
   }
 
   @Test
-  void getStateSnapshot_returnsAllFieldsWithEmptyOwnerId() {
+  void getStateSnapshot_returnsEveryField() {
     String sagaId = client.start(SAGA_NAME, Map.of());
 
     SagaStateSnapshot snapshot = client.getStateSnapshot(sagaId);
@@ -99,8 +99,6 @@ class SagaGrpcIntegrationTest extends ServerIntegrationTestSupport {
     assertThat(snapshot.getDefinitionVersion()).isNotBlank();
     assertThat(snapshot.getCreatedAt()).isNotNull();
     assertThat(snapshot.getUpdatedAt()).isNotNull();
-    // owner_id is a server-internal field dropped from the wire; the client fills it with "".
-    assertThat(snapshot.getOwnerId()).isEmpty();
   }
 
   @Test

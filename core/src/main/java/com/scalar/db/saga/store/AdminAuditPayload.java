@@ -42,7 +42,7 @@ public final class AdminAuditPayload {
     try {
       return MAPPER.writeValueAsString(map);
     } catch (JsonProcessingException e) {
-      throw SagaPersistenceException.nonRetryable("Failed to serialize admin audit payload", e);
+      throw SagaPersistenceException.serializationFailed(e);
     }
   }
 
@@ -55,24 +55,32 @@ public final class AdminAuditPayload {
   static SagaStatus target(@Nullable String payload) {
     Object value = decode(payload).get(STATUS);
     if (!(value instanceof Number number)) {
-      throw SagaPersistenceException.nonRetryable(
-          "Admin audit payload has no status: " + payload,
-          new IllegalStateException("missing status field"));
+      throw SagaPersistenceException.deserializationFailed(
+          new IllegalStateException("Admin audit payload has no status: " + payload));
     }
     try {
       return SagaStatus.fromStatusCode(number.intValue());
     } catch (IllegalArgumentException e) {
-      throw SagaPersistenceException.nonRetryable(
-          "Admin audit payload has an unknown status: " + payload, e);
+      throw SagaPersistenceException.deserializationFailed(e);
     }
   }
 
-  /** The operator recorded in {@code payload}, or {@code null} if absent. */
+  /**
+   * The operator recorded in {@code payload}, or {@code null} if absent.
+   *
+   * @param payload the audit payload JSON as stored on the event, or {@code null}
+   * @return the operator, or {@code null} when the payload is absent or carries none
+   */
   public static @Nullable String operator(@Nullable String payload) {
     return decode(payload).get(OPERATOR) instanceof String operator ? operator : null;
   }
 
-  /** The reason recorded in {@code payload}, or {@code null} if absent. */
+  /**
+   * The reason recorded in {@code payload}, or {@code null} if absent.
+   *
+   * @param payload the audit payload JSON as stored on the event, or {@code null}
+   * @return the reason, or {@code null} when the payload is absent or carries none
+   */
   public static @Nullable String reason(@Nullable String payload) {
     return decode(payload).get(REASON) instanceof String reason ? reason : null;
   }
@@ -85,7 +93,7 @@ public final class AdminAuditPayload {
       Map<String, Object> map = MAPPER.readValue(payload, MAP_TYPE);
       return map == null ? Collections.emptyMap() : map;
     } catch (JsonProcessingException e) {
-      throw SagaPersistenceException.nonRetryable("Failed to parse admin audit payload", e);
+      throw SagaPersistenceException.deserializationFailed(e);
     }
   }
 }

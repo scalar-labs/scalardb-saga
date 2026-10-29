@@ -1,16 +1,16 @@
 package com.scalar.db.saga.server.api;
 
 import com.scalar.db.saga.api.SagaCallback;
-import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
+import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
+import com.scalar.db.saga.exception.SagaInvalidRequestException;
+import com.scalar.db.saga.server.BoundedWait;
+import com.scalar.db.saga.server.SagaWaiterRegistry;
 import com.scalar.db.saga.server.security.SagaOperation;
-import io.javalin.Javalin;
 import io.javalin.http.Context;
+import io.javalin.router.JavalinDefaultRoutingApi;
 import java.util.Map;
-import java.util.Objects;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.CompletableFuture;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -20,31 +20,66 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code POST /sagas} — start a saga with a server-generated ID (synchronous by default;
  *       {@code ?async=true} returns {@code 202} immediately)
  *   <li>{@code PUT /sagas/{id}} — start a saga with a client-supplied ID (idempotent; {@code 409}
- *       with the existing snapshot on conflict)
+ *       with the standard error body on conflict, deliberately without the existing snapshot)
  *   <li>{@code GET /sagas/{id}} — fetch a saga's current state
  * </ul>
+ *
+ * <p><b>Why the conflict body omits the snapshot.</b> Defence in depth, not the control that
+ * prevents disclosure. Under today's RBAC it cannot be: starting a saga needs {@code WRITE}, {@code
+ * WRITE} implies {@code READ}, and reading one needs only {@code READ}, so a caller able to provoke
+ * the {@code 409} can simply {@code GET} the saga. {@code READ} is by-id and unscoped because the
+ * model carries no tenant identity. Keep the omission; it is the right shape for a future tenant
+ * model and costs nothing. Do not read it as the thing standing between an ID-guessing caller and
+ * another caller's state.
  *
  * <p><b>Synchronous outcome contract.</b> A {@code 200} from a synchronous start means the saga
  * <em>executed to a terminal state</em> — it does <b>not</b> imply business success. Callers must
  * inspect the body {@code status}: {@code COMPLETED} (succeeded) vs {@code COMPENSATED}/{@code
  * ESCALATED} (rolled back / stuck). A saga still resolving (e.g. {@code COMPENSATING}) returns
- * {@code 202} — poll {@code GET /sagas/{id}}. Pre-execution problems map to 4xx (unknown definition
- * → 404, duplicate ID → 409, invalid request → 400). This mirrors synchronous workflow APIs such as
- * AWS Step Functions {@code StartSyncExecution} and Netflix Conductor, which return {@code 200} for
- * a failed execution and carry the outcome in the body.
+ * {@code 202} — poll {@code GET /sagas/{id}}. This mirrors synchronous workflow APIs such as AWS
+ * Step Functions {@code StartSyncExecution} and Netflix Conductor, which return {@code 200} for a
+ * failed execution and carry the outcome in the body.
  *
- * <p><b>Bounded synchronous start (opt-in).</b> A synchronous start runs the saga on the engine's
- * (virtual-thread) executor and blocks the request thread only until the saga is terminal — which,
- * with retries/compensation over slow participants, can be long. When {@code
- * scalar.db.saga.server.sync.timeout_millis} is set (default {@code 0} = disabled, i.e. block to
- * terminal), the request instead returns {@code 202} once that bound elapses, while the saga keeps
- * running (poll {@code GET /sagas/{id}}). This caps how long a single request can hold a thread, so
- * a burst of slow synchronous sagas cannot exhaust the request pool. Returning {@code 202} (rather
- * than an error) is the honest outcome — the saga is not cancelled, it is still being processed —
- * and reuses the {@code 202} this endpoint already returns for a non-terminal outcome. The pattern
- * mirrors RFC 7240's {@code Prefer: respond-async, wait=N}, Azure Durable Functions' {@code
- * WaitForCompletionOrCreateCheckStatusResponse}, and Conductor's {@code executeWorkflow} wait
- * timeout.
+ * <p><b>Which failures are 4xx, and which are not.</b> Only what is checked <em>before</em> the
+ * saga is persisted maps to 4xx: unknown definition → {@code 404}, duplicate ID → {@code 409},
+ * invalid request → {@code 400}. Everything after that point — step resolution, a failing step,
+ * compensation — cannot reach the caller, because execution has already been handed to the engine's
+ * executor. A definition whose steps cannot be resolved is the sharpest case, and the caller never
+ * sees it: the plan is built before any step runs, so the exception escapes the drive before it has
+ * a verdict. No callback fires, nothing ends the wait, and the request runs out its whole bound to
+ * answer {@code 202} with a {@code RUNNING} body, indistinguishable from a healthy long saga. Only
+ * the server log says otherwise, as an {@code ERROR} carrying the exception. Recovery does not
+ * resolve it either: it re-drives the saga from step 0, which proceeds normally on a replica that
+ * can resolve the steps and throws again on one that cannot, leaving the saga {@code RUNNING} for a
+ * later pass. Nothing escalates it, because the grace-period gate keys off an unresolved {@code
+ * STEP_FAILED} and a plan that never builds writes none. So it stays outside retention, which
+ * purges only terminal statuses, and outside the admin verbs, which act on {@code ESCALATED} sagas;
+ * a misconfigured definition accumulates rows nothing will clean up, at request rate. This is the
+ * same rule gRPC has always followed, and it is the contract {@link
+ * com.scalar.db.saga.api.SagaOrchestrator} states for its {@code startAsync} overloads; until
+ * 2026-08 the default REST path used the synchronous {@code start} overloads, which did surface
+ * that failure as a 4xx.
+ *
+ * <p><b>No run-to-completion in a single request.</b> The wait bound is unconditional, so a saga
+ * that outlives it answers {@code 202} and the client polls {@code GET /sagas/{id}}. There is no
+ * long-poll on this surface — no {@code ?wait=} — so past the bound the poll carries no server-side
+ * wait. gRPC's {@code AwaitSaga} is a resumable window the Java SDK loops to deliver
+ * block-until-terminal; REST has no analogue, and this API exists precisely for consumers who skip
+ * that SDK. A REST long-poll bounded by the same policy would close the gap without restoring an
+ * unbounded wait; see {@code todos/086}.
+ *
+ * <p><b>Bounded synchronous start.</b> A synchronous start runs the saga on the engine's
+ * (virtual-thread) executor and waits, never longer than the {@code sync.max_wait_millis} ceiling.
+ * The wait ends as soon as the saga reaches a terminal state, and at the bound at the latest, after
+ * which the request returns {@code 202} while the saga keeps running (poll {@code GET
+ * /sagas/{id}}). A saga that parks on an async step does not end the wait: it may still finish
+ * inside the bound, and the read at bound expiry reports that outcome. This caps how long a single
+ * request can hold a thread, so a burst of slow synchronous sagas cannot exhaust the request pool.
+ * Returning {@code 202} rather than an error is the honest outcome: the saga is not cancelled, it
+ * is still being processed, and it reuses the {@code 202} this endpoint already returns for a
+ * non-terminal outcome. The pattern mirrors RFC 7240's {@code Prefer: respond-async, wait=N}, Azure
+ * Durable Functions' {@code WaitForCompletionOrCreateCheckStatusResponse}, and Conductor's {@code
+ * executeWorkflow} wait timeout.
  *
  * <p>Not yet wired: {@code PUT /sagas/{id}/cancel} (needs the engine's {@code cancel} method). The
  * {@code GET /sagas} listing lives on the admin surface ({@link SagaAdminResource}).
@@ -54,59 +89,86 @@ public final class SagaResource {
   private SagaResource() {}
 
   /**
-   * Registers the saga lifecycle routes on the given app.
+   * Registers the saga lifecycle routes on the given routing configuration.
    *
-   * @param app the Javalin app
+   * @param routes the routing configuration the server is created with
    * @param orchestrator the saga orchestrator the endpoints delegate to
-   * @param syncTimeoutMillis the synchronous-start timeout ({@code 0} disables it; see the class
-   *     doc's bounded-synchronous-start note)
+   * @param syncWaitBoundMillis how long a synchronous start may wait before answering {@code 202},
+   *     already resolved from the {@code sync.*} keys. Always finite, so no start can block
+   *     indefinitely.
+   * @param shutdownSignal completes when the server begins shutting down, ending a bounded wait
+   *     early rather than letting it run to its bound on a server that cannot advance the saga
+   * @param waiterRegistry where a bounded wait registers, so any drive settling the saga on this
+   *     process wakes it; shared with the engine and the gRPC transport
    */
-  public static void register(Javalin app, SagaOrchestrator orchestrator, long syncTimeoutMillis) {
-    app.post(
+  public static void register(
+      JavalinDefaultRoutingApi routes,
+      DefaultSagaOrchestrator orchestrator,
+      long syncWaitBoundMillis,
+      CompletableFuture<Void> shutdownSignal,
+      SagaWaiterRegistry waiterRegistry) {
+    routes.post(
         "/sagas",
         ctx -> {
           StartSagaRequest request = parseRequest(ctx);
           Map<String, Object> input = request.inputOrEmpty();
           if (isAsync(ctx.queryParam("async"))) {
-            String sagaId = orchestrator.startAsync(request.requireSagaName(), input);
-            respond(ctx, 202, orchestrator.getStateSnapshot(sagaId));
-          } else if (syncTimeoutMillis > 0) {
-            AtomicReference<SagaStateSnapshot> terminal = new AtomicReference<>();
-            CountDownLatch done = new CountDownLatch(1);
-            String sagaId =
-                orchestrator.startAsync(
-                    request.requireSagaName(), input, terminalSignal(done, terminal));
-            respondBoundedSync(ctx, orchestrator, sagaId, done, terminal, syncTimeoutMillis);
+            respond(
+                ctx,
+                202,
+                orchestrator.startAsyncReturningSnapshot(
+                    null, request.requireSagaName(), null, input, null));
           } else {
-            String sagaId = orchestrator.start(request.requireSagaName(), input);
-            respondSync(ctx, orchestrator, sagaId);
+            CompletableFuture<SagaStateSnapshot> settled = new CompletableFuture<>();
+            CompletableFuture<Void> parked = new CompletableFuture<>();
+            SagaStateSnapshot created =
+                orchestrator.startAsyncReturningSnapshot(
+                    null, request.requireSagaName(), null, input, outcomeSignal(settled, parked));
+            respondBoundedSync(
+                ctx,
+                orchestrator,
+                waiterRegistry,
+                created,
+                settled,
+                parked,
+                shutdownSignal,
+                syncWaitBoundMillis);
           }
         },
         SagaOperation.START_SAGA);
 
-    app.put(
+    routes.put(
         "/sagas/{id}",
         ctx -> {
           String sagaId = ctx.pathParam("id");
           StartSagaRequest request = parseRequest(ctx);
           Map<String, Object> input = request.inputOrEmpty();
           if (isAsync(ctx.queryParam("async"))) {
-            orchestrator.startAsync(sagaId, request.requireSagaName(), input);
-            respond(ctx, 202, orchestrator.getStateSnapshot(sagaId));
-          } else if (syncTimeoutMillis > 0) {
-            AtomicReference<SagaStateSnapshot> terminal = new AtomicReference<>();
-            CountDownLatch done = new CountDownLatch(1);
-            orchestrator.startAsync(
-                sagaId, request.requireSagaName(), input, terminalSignal(done, terminal));
-            respondBoundedSync(ctx, orchestrator, sagaId, done, terminal, syncTimeoutMillis);
+            respond(
+                ctx,
+                202,
+                orchestrator.startAsyncReturningSnapshot(
+                    sagaId, request.requireSagaName(), null, input, null));
           } else {
-            orchestrator.start(sagaId, request.requireSagaName(), input);
-            respondSync(ctx, orchestrator, sagaId);
+            CompletableFuture<SagaStateSnapshot> settled = new CompletableFuture<>();
+            CompletableFuture<Void> parked = new CompletableFuture<>();
+            SagaStateSnapshot created =
+                orchestrator.startAsyncReturningSnapshot(
+                    sagaId, request.requireSagaName(), null, input, outcomeSignal(settled, parked));
+            respondBoundedSync(
+                ctx,
+                orchestrator,
+                waiterRegistry,
+                created,
+                settled,
+                parked,
+                shutdownSignal,
+                syncWaitBoundMillis);
           }
         },
         SagaOperation.START_SAGA);
 
-    app.get(
+    routes.get(
         "/sagas/{id}",
         ctx -> respond(ctx, 200, orchestrator.getStateSnapshot(ctx.pathParam("id"))),
         SagaOperation.GET_SAGA);
@@ -114,7 +176,7 @@ public final class SagaResource {
     // A saga's detail (state + timeline). An application read of its own saga — self-service
     // diagnosis of a failure — so it lives here with the other application reads, not on the admin
     // surface; the timeline redacts raw step payloads.
-    app.get(
+    routes.get(
         "/sagas/{id}/detail",
         ctx ->
             ctx.status(200)
@@ -123,74 +185,91 @@ public final class SagaResource {
   }
 
   /**
-   * Renders a synchronous start response: {@code 200} once the saga has reached a terminal state
-   * (the body {@code status} carries the business outcome — {@code COMPLETED} vs {@code
-   * COMPENSATED}/{@code ESCALATED}), or {@code 202} while it is still resolving ({@code
-   * COMPENSATING} / parked {@code RUNNING}) — poll {@code GET /sagas/{id}}.
+   * A {@link SagaCallback} that captures the saga's outcome and releases the wait when the saga
+   * reaches a terminal state.
+   *
+   * <p>Parking deliberately does <b>not</b> release it. A parked saga is still live and may well
+   * finish inside the bound, and the bound-expiry read in {@link #respondBoundedSync} sees that
+   * outcome whichever replica produced it. Waking here would answer {@code 202} in milliseconds and
+   * throw away an answer the caller asked to wait for.
    */
-  private static void respondSync(Context ctx, SagaOrchestrator orchestrator, String sagaId) {
-    SagaStateSnapshot snapshot = orchestrator.getStateSnapshot(sagaId);
-    respond(ctx, snapshot.getStatus().isTerminal() ? 200 : 202, snapshot);
-  }
-
-  /**
-   * A {@link SagaCallback} that captures the terminal snapshot and releases {@code done} when the
-   * saga finishes (in any terminal outcome), so a bounded synchronous start can wake as soon as the
-   * saga is done rather than always waiting the full timeout.
-   */
-  private static SagaCallback terminalSignal(
-      CountDownLatch done, AtomicReference<SagaStateSnapshot> terminal) {
+  private static SagaCallback outcomeSignal(
+      CompletableFuture<SagaStateSnapshot> settled, CompletableFuture<Void> parked) {
     return new SagaCallback() {
       @Override
+      public void onParked(SagaStateSnapshot saga) {
+        // Not an outcome — the wait continues. It only means the saga can now be resumed
+        // elsewhere, so the wait should start polling for what a local push can no longer catch.
+        parked.complete(null);
+      }
+
+      @Override
       public void onCompleted(SagaStateSnapshot saga) {
-        terminal.set(saga);
-        done.countDown();
+        settled.complete(saga);
       }
 
       @Override
       public void onCompensated(SagaStateSnapshot saga) {
-        terminal.set(saga);
-        done.countDown();
+        settled.complete(saga);
       }
 
       @Override
       public void onEscalated(SagaStateSnapshot saga) {
-        terminal.set(saga);
-        done.countDown();
+        // Terminal, so it settles the wait. It all but never fires (see SagaCallback#onEscalated);
+        // overridden anyway because without it this wait would run out its whole bound and only
+        // then read the same outcome back.
+        settled.complete(saga);
       }
     };
   }
 
   /**
-   * Renders a <em>bounded</em> synchronous start: waits up to {@code timeoutMillis} for the saga to
-   * reach a terminal state. If it does, responds like {@link #respondSync} ({@code 200}/{@code
-   * 202}); if the bound elapses first, responds {@code 202} with the in-flight snapshot while the
-   * saga keeps running on the engine's executor (the client polls {@code GET /sagas/{id}}). The
-   * request thread is therefore held for at most {@code timeoutMillis}, never the saga's full run.
+   * Renders a bounded synchronous start. The wait ends at whichever comes first: the saga reaches a
+   * terminal state, the server begins shutting down, or the bound elapses. Whatever ends it, the
+   * response carries the freshest state available and the status decides the code — terminal is
+   * {@code 200}, anything else {@code 202} with the saga still running (the client polls {@code GET
+   * /sagas/{id}}).
+   *
+   * <p>A saga that parks on an async step does <b>not</b> end the wait. Parking is not an outcome:
+   * the saga is live and may finish well inside the bound, and it can be resumed by any replica, so
+   * the read below reports the outcome whichever one produced it. Ending the wait at the park would
+   * answer {@code 202} in milliseconds and discard the answer the caller asked to wait for.
+   *
+   * <p>Shutdown short-circuits the wait rather than letting it run to the bound. The bound is a
+   * maximum, not a promise to wait, and a terminating server cannot advance the saga anyway — under
+   * the default {@code WAIT_CURRENT_STEP} the engine stops between steps — so holding the request
+   * would answer the same {@code 202} up to a minute later, on a process that may be killed before
+   * it can. Answering now also frees the connection while the load balancer is still draining.
    */
   private static void respondBoundedSync(
       Context ctx,
-      SagaOrchestrator orchestrator,
-      String sagaId,
-      CountDownLatch done,
-      AtomicReference<SagaStateSnapshot> terminal,
+      DefaultSagaOrchestrator orchestrator,
+      SagaWaiterRegistry waiterRegistry,
+      SagaStateSnapshot created,
+      CompletableFuture<SagaStateSnapshot> settled,
+      CompletableFuture<Void> parked,
+      CompletableFuture<Void> shutdownSignal,
       long timeoutMillis) {
-    boolean reached;
-    try {
-      reached = done.await(timeoutMillis, TimeUnit.MILLISECONDS);
-    } catch (InterruptedException e) {
-      // The request thread was interrupted (e.g. shutdown); stop waiting. The saga continues, so
-      // 202 is the honest answer.
-      Thread.currentThread().interrupt();
-      reached = false;
+    SagaStateSnapshot snapshot;
+    // One future, completed by whichever mechanism sees the saga settle first. The callback was
+    // handed out before the saga id existed; on a server-generated id there is nothing to register
+    // under until startAsync returns. The registry covers every drive after the registration
+    // below, including the resume that follows an asynchronous step and carries none.
+    //
+    // Neither covers a drive that parks before that registration. Its callback ends at the park
+    // and its resume carries none, so a settle in that window reaches no one; the wait reads once
+    // where polling begins to catch it.
+    String sagaId = created.getSagaId();
+    try (SagaWaiterRegistry.Waiter waiter = waiterRegistry.register(sagaId, settled)) {
+      snapshot =
+          BoundedWait.awaitWithin(
+              settled,
+              shutdownSignal,
+              parked,
+              timeoutMillis,
+              () -> orchestrator.getStateSnapshot(sagaId));
     }
-    if (reached) {
-      // 'reached' means a terminal callback ran, which sets 'terminal' before counting down.
-      SagaStateSnapshot snapshot = Objects.requireNonNull(terminal.get());
-      respond(ctx, snapshot.getStatus().isTerminal() ? 200 : 202, snapshot);
-    } else {
-      respond(ctx, 202, orchestrator.getStateSnapshot(sagaId));
-    }
+    respond(ctx, snapshot.getStatus().isTerminal() ? 200 : 202, snapshot);
   }
 
   /** Renders a saga snapshot as the JSON response body with the given HTTP status. */
@@ -208,12 +287,12 @@ public final class SagaResource {
     try {
       request = ctx.bodyAsClass(StartSagaRequest.class);
     } catch (Exception e) {
-      throw new InvalidRequestException("malformed request body");
+      throw new SagaInvalidRequestException("malformed request body");
     }
     // A body of the JSON null literal deserializes to null without throwing; reject it cleanly here
     // rather than NPE-ing downstream. The check is outside the try so its message survives.
     if (request == null) {
-      throw new InvalidRequestException("request body must not be null");
+      throw new SagaInvalidRequestException("request body must not be null");
     }
     return request;
   }
@@ -221,7 +300,12 @@ public final class SagaResource {
   /**
    * Parses the {@code ?async} flag. Absent → synchronous (the default). Accepts {@code true}/{@code
    * false} (case-insensitive); any other value is rejected with {@code 400} rather than silently
-   * taking the (riskier, thread-pinning) synchronous path.
+   * taking the (riskier, request-holding) synchronous path.
+   *
+   * <p>Request-holding, not thread-pinning: the synchronous branch hands the saga to {@code
+   * startAsync} and parks a virtual thread, where it once drove it inline on the calling Jetty
+   * worker. What {@code ?async=true} still avoids is holding the request at all, for up to the
+   * whole bound now that a park no longer ends the wait.
    */
   private static boolean isAsync(@Nullable String value) {
     if (value == null) {
@@ -233,6 +317,6 @@ public final class SagaResource {
     if ("false".equalsIgnoreCase(value)) {
       return false;
     }
-    throw new InvalidRequestException("query parameter 'async' must be 'true' or 'false'");
+    throw new SagaInvalidRequestException("query parameter 'async' must be 'true' or 'false'");
   }
 }

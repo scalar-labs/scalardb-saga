@@ -13,7 +13,7 @@ description =
 
 // The Java-8 gRPC wire contract: the `.proto` plus the generated message + service stubs, shared by
 // the server and the client SDK. Generated under --release 8 so the Java 8 client can consume it;
-// the Java 21 server consumes it too (newer-uses-older).
+// the Java 25 server consumes it too (newer-uses-older).
 dependencies {
     api(platform(libs.grpc.bom))
     api(libs.grpc.protobuf)
@@ -35,4 +35,12 @@ spotless {
 // setting keeps both off the generated sources.
 tasks.withType<JavaCompile>().configureEach {
     options.errorprone.excludedPaths = ".*/build/generated/.*"
+}
+
+// Javadoc: the stubs are generated, so doclint's "missing" group (no comment, no @param, no @return)
+// is off, as Spotless and Error Prone already are for them; the javadoc jar still ships so consumers
+// of the wire contract get class pages. Every other doclint warning fails the build through the
+// conventions' -Werror, since nothing here needs writing to reach zero.
+tasks.withType<Javadoc>().configureEach {
+    (options as StandardJavadocDocletOptions).addBooleanOption("Xdoclint:all,-missing", true)
 }

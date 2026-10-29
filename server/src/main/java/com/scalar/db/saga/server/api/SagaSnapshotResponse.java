@@ -5,6 +5,13 @@ import com.scalar.db.saga.api.SagaStateSnapshot;
 /**
  * REST response view of a saga's current state. Timestamps are ISO-8601 strings to keep the JSON
  * representation independent of the server's JSON date handling.
+ *
+ * @param sagaId the saga instance id
+ * @param sagaName the name of the saga definition the instance runs
+ * @param status the {@code SagaStatus} name, such as {@code "RUNNING"}
+ * @param definitionVersion the version of the saga definition the instance runs
+ * @param createdAt when the instance was created, as an ISO-8601 instant
+ * @param updatedAt when the instance's state last changed, as an ISO-8601 instant
  */
 public record SagaSnapshotResponse(
     String sagaId,

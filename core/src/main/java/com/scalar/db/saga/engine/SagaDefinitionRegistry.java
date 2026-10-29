@@ -49,6 +49,11 @@ public class SagaDefinitionRegistry {
   /**
    * Versioned lookup with store fallback. Used during recovery and async step completion, where the
    * definition version must match the one used when the saga was created (even after a redeploy).
+   *
+   * @param sagaName the saga name
+   * @param version the definition version the saga was created with
+   * @return the definition, or {@code null} when that version is registered neither in memory nor
+   *     in the store
    */
   public @Nullable SagaDefinition resolve(String sagaName, String version) {
     String key = sagaName + ":" + version;

@@ -1,66 +1,174 @@
 package com.scalar.db.saga.server.grpc;
 
+import static com.scalar.db.saga.server.grpc.ErrorInfos.errorInfo;
+import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 
+import ch.qos.logback.classic.Level;
 import com.google.protobuf.Any;
+import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.rpc.ErrorInfo;
+import com.google.rpc.RetryInfo;
+import com.scalar.db.saga.api.SagaStateSnapshot;
+import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.exception.ErrorMetadata;
+import com.scalar.db.saga.exception.SagaAlreadyExistsException;
+import com.scalar.db.saga.exception.SagaConcurrentModificationException;
+import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaDefinitionNotServedException;
+import com.scalar.db.saga.exception.SagaErrorCode;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
+import com.scalar.db.saga.exception.SagaInvalidRequestException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.exception.SagaOverloadedException;
+import com.scalar.db.saga.exception.SagaPersistenceException;
+import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
+import com.scalar.db.saga.exception.SagaStepNotParkedException;
+import com.scalar.db.saga.server.LogCapture;
+import com.scalar.db.saga.server.api.ErrorMapper;
+import com.scalar.db.saga.server.docs.StatusCodeReference;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.protobuf.StatusProto;
+import java.time.Instant;
+import java.util.EnumMap;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
 
 /**
- * Unit-tests {@link GrpcErrorMapper}: the server-fault vs client-fault distinction — the exception
- * types whose gRPC code differs — and the machine-readable {@link ErrorInfo} reason it attaches
- * where a caller must switch on the cause. An {@link IllegalStateException} (a server-side
- * invariant violation, e.g. an api/proto enum skew on the response path) must map to {@code
- * INTERNAL}, not the client-facing {@code INVALID_ARGUMENT} that {@link IllegalArgumentException}
- * (an engine-rejected client value) maps to. Either way only a fixed, daemon-owned description is
- * surfaced.
+ * Unit-tests {@link GrpcErrorMapper}: the per-type gRPC status table, and the generic {@link
+ * ErrorInfo} body carrying the {@link SagaErrorCode#code()} as {@code reason} and the exception's
+ * schema metadata as {@code metadata}. Leak-sensitive statuses ({@code INTERNAL}, {@code
+ * UNAVAILABLE}) surface only a fixed daemon-owned description.
  */
 class GrpcErrorMapperTest {
 
   @Test
-  void toStatusRuntimeException_illegalStateGiven_mapsToInternal() {
+  void toStatusRuntimeException_illegalStateGiven_mapsToInternalWithInternalErrorCode() {
     StatusRuntimeException e =
         GrpcErrorMapper.toStatusRuntimeException(new IllegalStateException("server invariant"));
 
     assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INTERNAL);
-    // The internal message is never surfaced; a fixed daemon-owned description is.
-    assertThat(e.getStatus().getDescription()).isEqualTo("Internal server error");
+    // The internal message is never surfaced; the enum's fixed message is.
+    assertThat(e.getStatus().getDescription())
+        .contains(SagaErrorCode.INTERNAL_ERROR.code())
+        .doesNotContain("server invariant");
+    assertThat(errorInfo(e).getReason()).isEqualTo(SagaErrorCode.INTERNAL_ERROR.code());
   }
 
   @Test
-  void toStatusRuntimeException_illegalArgumentGiven_mapsToInvalidArgument() {
-    StatusRuntimeException e =
-        GrpcErrorMapper.toStatusRuntimeException(new IllegalArgumentException("bad client value"));
+  void toStatusRuntimeException_droppedSagaTableGiven_isInternalAndLoggedAtError() {
+    // ScalarDB's operation checkers throw a bare IllegalArgumentException for a missing table, and
+    // ConsensusCommit wraps only the checked ExecutionException, so it reaches the mapper
+    // unwrapped. Answering it with INVALID_ARGUMENT told every caller its own request was
+    // malformed, and INVALID_ARGUMENT is USER_ERROR, so the retry contract also told them not to
+    // retry and not to alert while the store was down.
+    try (LogCapture logs = LogCapture.of(GrpcErrorMapper.class)) {
+      // Act
+      StatusRuntimeException e =
+          GrpcErrorMapper.toStatusRuntimeException(
+              new IllegalArgumentException("Table not found: saga.saga_sweep"));
 
-    assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
-    assertThat(e.getStatus().getDescription()).isEqualTo("Invalid request parameter");
+      // Assert
+      assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INTERNAL);
+      // The table name is internal topology and stays server-side.
+      assertThat(e.getStatus().getDescription()).doesNotContain("saga_sweep");
+      ErrorInfo info = errorInfo(e);
+      assertThat(info.getReason()).isEqualTo(SagaErrorCode.INTERNAL_ERROR.code());
+      assertThat(logs.events())
+          .anySatisfy(
+              event -> {
+                assertThat(event.getLevel()).isEqualTo(Level.ERROR);
+                assertThat(event.getThrowableProxy()).isNotNull();
+                assertThat(event.getThrowableProxy().getMessage())
+                    .isEqualTo("Table not found: saga.saga_sweep");
+              });
+    }
   }
 
   @Test
-  void toStatusRuntimeException_sagaNotFoundGiven_mapsToNotFoundWithReason() {
+  void toStatusRuntimeException_malformedErrorMetadataGiven_isInternalNotTheCallersFault() {
+    // Arrange — a throw site whose metadata map does not match its code's schema fails inside the
+    // SagaRuntimeException constructor, as a bare IllegalArgumentException. It is our bug, and it
+    // used to replace whatever error was being reported with the caller's own INVALID_ARGUMENT.
+    IllegalArgumentException schemaMismatch =
+        catchThrowableOfType(
+            IllegalArgumentException.class,
+            () -> new SagaRuntimeException(SagaErrorCode.SAGA_NOT_FOUND, Map.of("wrong_key", "x")));
+
+    try (LogCapture logs = LogCapture.of(GrpcErrorMapper.class)) {
+      // Act
+      StatusRuntimeException e = GrpcErrorMapper.toStatusRuntimeException(schemaMismatch);
+
+      // Assert
+      assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INTERNAL);
+      assertThat(errorInfo(e).getReason()).isEqualTo(SagaErrorCode.INTERNAL_ERROR.code());
+      // The offending key is ours, not the caller's, so it stays server-side.
+      assertThat(e.getStatus().getDescription()).doesNotContain("wrong_key");
+      assertThat(errorInfo(e).getMetadataMap()).isEmpty();
+      assertThat(logs.events())
+          .anySatisfy(
+              event -> {
+                assertThat(event.getLevel()).isEqualTo(Level.ERROR);
+                assertThat(event.getThrowableProxy()).isNotNull();
+                assertThat(event.getThrowableProxy().getClassName())
+                    .isEqualTo(IllegalArgumentException.class.getName());
+              });
+    }
+  }
+
+  @Test
+  void toStatusRuntimeException_unmappedThrowableGiven_logsTheThrowableTheWireDrops() {
+    // The wire carries the generic INTERNAL_ERROR message and no cause, so this log line is the
+    // only surviving record of what actually failed. Held apart from the dropped-table case above
+    // because this arm is reached by any unmapped throwable, not only the store's.
+    try (LogCapture logs = LogCapture.of(GrpcErrorMapper.class)) {
+      // Act
+      GrpcErrorMapper.toStatusRuntimeException(
+          new IllegalArgumentException("engine-internal wording"));
+
+      // Assert
+      assertThat(logs.events())
+          .anySatisfy(
+              event -> {
+                assertThat(event.getThrowableProxy()).isNotNull();
+                assertThat(event.getThrowableProxy().getClassName())
+                    .isEqualTo(IllegalArgumentException.class.getName());
+                assertThat(event.getThrowableProxy().getMessage())
+                    .isEqualTo("engine-internal wording");
+              });
+    }
+  }
+
+  @Test
+  void toStatusRuntimeException_sagaNotFoundGiven_mapsToNotFoundWithCodeReason() {
     StatusRuntimeException e =
         GrpcErrorMapper.toStatusRuntimeException(new SagaNotFoundException("s-1"));
 
     assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.NOT_FOUND);
-    assertThat(errorInfo(e).getReason()).isEqualTo("SAGA_NOT_FOUND");
+    ErrorInfo info = errorInfo(e);
+    assertThat(info.getReason()).isEqualTo(SagaErrorCode.SAGA_NOT_FOUND.code());
+    assertThat(info.getMetadataMap()).containsEntry("saga_id", "s-1");
   }
 
   @Test
-  void toStatusRuntimeException_definitionNotFoundNameOnlyGiven_carriesNameMetadata() {
+  void toStatusRuntimeException_definitionNotFoundNameOnlyGiven_carriesSagaNameMetadata() {
     StatusRuntimeException e =
-        GrpcErrorMapper.toStatusRuntimeException(new SagaDefinitionNotFoundException("orders"));
+        GrpcErrorMapper.toStatusRuntimeException(SagaDefinitionNotFoundException.byName("orders"));
 
     assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.NOT_FOUND);
     ErrorInfo info = errorInfo(e);
-    assertThat(info.getReason()).isEqualTo("SAGA_DEFINITION_NOT_FOUND");
+    assertThat(info.getReason()).isEqualTo(SagaErrorCode.SAGA_DEFINITION_NOT_FOUND.code());
     assertThat(info.getMetadataMap())
-        .containsEntry("sagaName", "orders")
+        .containsEntry("saga_name", "orders")
         .doesNotContainKey("version");
   }
 
@@ -68,46 +176,352 @@ class GrpcErrorMapperTest {
   void toStatusRuntimeException_definitionNotFoundWithVersionGiven_carriesNameAndVersion() {
     StatusRuntimeException e =
         GrpcErrorMapper.toStatusRuntimeException(
-            new SagaDefinitionNotFoundException("orders", "v2"));
+            SagaDefinitionNotFoundException.byNameAndVersion("orders", "v2"));
 
     assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.NOT_FOUND);
     ErrorInfo info = errorInfo(e);
-    assertThat(info.getReason()).isEqualTo("SAGA_DEFINITION_NOT_FOUND");
+    assertThat(info.getReason()).isEqualTo(SagaErrorCode.SAGA_DEFINITION_VERSION_NOT_FOUND.code());
     assertThat(info.getMetadataMap())
-        .containsEntry("sagaName", "orders")
+        .containsEntry("saga_name", "orders")
         .containsEntry("version", "v2");
+  }
+
+  /** One dispatch arm per row: the thrown exception, the gRPC status, and the ErrorInfo reason. */
+  private record Arm(Throwable thrown, Status.Code status, SagaErrorCode code) {}
+
+  /**
+   * The golden table: every arm of the dispatch switch, both branches where an arm branches
+   * (persistence retryable vs not, definition bad-request vs conflict). A new arm without a row
+   * here — or a row without an arm — is a conscious edit to this list, not a silent gap.
+   */
+  private static List<Arm> allArms() {
+    SagaStateSnapshot existing =
+        new SagaStateSnapshot(
+            "s-1",
+            "transfer",
+            SagaStatus.RUNNING,
+            "v1",
+            Instant.ofEpochSecond(1_700_000_000L),
+            Instant.ofEpochSecond(1_700_000_000L));
+    return List.of(
+        // No case: a bare IllegalArgumentException is a server fault, so it takes the default
+        // arm's INTERNAL rather than the caller's INVALID_ARGUMENT.
+        new Arm(
+            new IllegalArgumentException("bad"),
+            Status.Code.INTERNAL,
+            SagaErrorCode.INTERNAL_ERROR),
+        new Arm(
+            new SagaInvalidRequestException("x"),
+            Status.Code.INVALID_ARGUMENT,
+            SagaErrorCode.INVALID_REQUEST),
+        new Arm(
+            new SagaIllegalArgumentException("x"),
+            Status.Code.INVALID_ARGUMENT,
+            SagaErrorCode.INVALID_ARGUMENT),
+        new Arm(
+            SagaDefinitionException.definitionInvalid("transfer", "dup step"),
+            Status.Code.INVALID_ARGUMENT,
+            SagaErrorCode.INVALID_DEFINITION),
+        new Arm(
+            SagaDefinitionException.declarativeStepInvalid("debit", "missing 'path'"),
+            Status.Code.INVALID_ARGUMENT,
+            SagaErrorCode.INVALID_STEP_DEFINITION),
+        new Arm(
+            SagaDefinitionException.definitionMalformed("json", new RuntimeException()),
+            Status.Code.INVALID_ARGUMENT,
+            SagaErrorCode.MALFORMED_DEFINITION),
+        new Arm(
+            SagaDefinitionException.sourceUnreadable("x.json"),
+            Status.Code.INVALID_ARGUMENT,
+            SagaErrorCode.UNREADABLE_DEFINITION_SOURCE),
+        new Arm(
+            SagaDefinitionException.stepClassInvalid("com.example.C", "not a Step"),
+            Status.Code.INVALID_ARGUMENT,
+            SagaErrorCode.INVALID_STEP_CLASS),
+        new Arm(
+            SagaDefinitionException.stepClassNotSupportedOnServer("transfer", "debit"),
+            Status.Code.INVALID_ARGUMENT,
+            SagaErrorCode.STEP_CLASS_NOT_SUPPORTED_ON_SERVER),
+        new Arm(
+            SagaDefinitionException.httpEndpointLookupFailed("none registered"),
+            Status.Code.INVALID_ARGUMENT,
+            SagaErrorCode.HTTP_ENDPOINT_LOOKUP_FAILED),
+        new Arm(
+            SagaDefinitionException.versionContentConflict("transfer", "v2"),
+            Status.Code.ALREADY_EXISTS,
+            SagaErrorCode.SAGA_DEFINITION_VERSION_CONTENT_CONFLICT),
+        new Arm(
+            new SagaNotFoundException("s-1"), Status.Code.NOT_FOUND, SagaErrorCode.SAGA_NOT_FOUND),
+        new Arm(
+            SagaDefinitionNotFoundException.byName("transfer"),
+            Status.Code.NOT_FOUND,
+            SagaErrorCode.SAGA_DEFINITION_NOT_FOUND),
+        new Arm(
+            SagaDefinitionNotFoundException.byNameAndVersion("transfer", "v2"),
+            Status.Code.NOT_FOUND,
+            SagaErrorCode.SAGA_DEFINITION_VERSION_NOT_FOUND),
+        new Arm(
+            new SagaAlreadyExistsException("s-1", existing),
+            Status.Code.ALREADY_EXISTS,
+            SagaErrorCode.SAGA_ALREADY_EXISTS),
+        new Arm(
+            new SagaConcurrentModificationException("s-1"),
+            Status.Code.ABORTED,
+            SagaErrorCode.SAGA_CONCURRENT_MODIFICATION),
+        new Arm(
+            SagaStatePreconditionException.wrongState("s-1", "RUNNING", "recover"),
+            Status.Code.FAILED_PRECONDITION,
+            SagaErrorCode.SAGA_WRONG_STATE),
+        new Arm(
+            SagaStatePreconditionException.parked("s-1"),
+            Status.Code.FAILED_PRECONDITION,
+            SagaErrorCode.SAGA_PARKED),
+        new Arm(
+            SagaDefinitionNotServedException.of("order-saga"),
+            Status.Code.FAILED_PRECONDITION,
+            SagaErrorCode.SAGA_DEFINITION_NOT_SERVED),
+        new Arm(
+            new SagaOverloadedException(),
+            Status.Code.UNAVAILABLE,
+            SagaErrorCode.ENGINE_OVERLOADED),
+        new Arm(
+            new SagaStepNotParkedException("s-1", "charge"),
+            Status.Code.UNAVAILABLE,
+            SagaErrorCode.SAGA_STEP_NOT_PARKED),
+        new Arm(
+            SagaPersistenceException.storeUnavailable(new RuntimeException("db down")),
+            Status.Code.UNAVAILABLE,
+            SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE),
+        new Arm(
+            SagaPersistenceException.operationAborted(new InterruptedException("shutdown")),
+            Status.Code.UNAVAILABLE,
+            SagaErrorCode.OPERATION_ABORTED),
+        new Arm(
+            SagaPersistenceException.serializationFailed(new RuntimeException("bad json")),
+            Status.Code.INTERNAL,
+            SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED),
+        new Arm(
+            SagaPersistenceException.deserializationFailed(new RuntimeException("schema drift")),
+            Status.Code.INTERNAL,
+            SagaErrorCode.PERSISTENCE_DESERIALIZATION_FAILED),
+        // The category fallback for an unmapped SagaRuntimeException subclass.
+        new Arm(
+            new SagaRuntimeException(SagaErrorCode.RATE_LIMIT_EXCEEDED, ErrorMetadata.of()),
+            Status.Code.UNAVAILABLE,
+            SagaErrorCode.RATE_LIMIT_EXCEEDED),
+        // The non-Saga catch-all.
+        new Arm(
+            new IllegalStateException("boom"), Status.Code.INTERNAL, SagaErrorCode.INTERNAL_ERROR));
+  }
+
+  @Test
+  void toStatusRuntimeException_everyArm_mapsToItsStatusAndReason() {
+    for (Arm arm : allArms()) {
+      StatusRuntimeException e = GrpcErrorMapper.toStatusRuntimeException(arm.thrown());
+
+      assertThat(e.getStatus().getCode())
+          .as("status of %s", arm.thrown().getClass().getSimpleName())
+          .isEqualTo(arm.status());
+      assertThat(errorInfo(e).getReason())
+          .as("reason of %s", arm.thrown().getClass().getSimpleName())
+          .isEqualTo(arm.code().code());
+    }
+  }
+
+  @Test
+  void toStatusRuntimeException_userErrorCodes_statusMatchesTheSubRange() {
+    // The class javadoc of SagaErrorCode pins USER_ERROR sub-ranges by client-facing consequence
+    // (100xx bad request, 101xx auth, 102xx not-found, 103xx conflict, 104xx precondition), and
+    // the docs generator files codes by it. SagaErrorCodeTest guards digit 1 (the category); this
+    // guards the next two against what this mapper actually answers, so a code cannot sit in the
+    // conflict range while the daemon says INVALID_ARGUMENT — which is exactly how
+    // SAGA_DEFINITION_VERSION_CONTENT_CONFLICT shipped 400 until the guarded dispatch arm was
+    // added.
+    Map<String, List<Status.Code>> statusesBySubRange =
+        Map.of(
+            "100", List.of(Status.Code.INVALID_ARGUMENT),
+            "101", List.of(Status.Code.UNAUTHENTICATED, Status.Code.PERMISSION_DENIED),
+            "102", List.of(Status.Code.NOT_FOUND),
+            "103", List.of(Status.Code.ALREADY_EXISTS),
+            "104", List.of(Status.Code.FAILED_PRECONDITION));
+    for (Arm arm : allArms()) {
+      if (arm.code().category() != SagaErrorCode.Category.USER_ERROR) {
+        continue;
+      }
+      String subRange = arm.code().code().substring("DB-SAGA-".length(), "DB-SAGA-".length() + 3);
+
+      assertThat(arm.status())
+          .as("%s is numbered in sub-range %sxx", arm.code().name(), subRange)
+          .isIn(statusesBySubRange.get(subRange));
+    }
+  }
+
+  @Test
+  void allArms_coverEveryMapperProducibleCode() {
+    // Codes deliberately absent from the dispatch table; every entry says why. A new enum
+    // constant that lands in neither place fails here, so a forgotten mapper arm is a build
+    // failure instead of a silent category-fallback response contradicting its own sub-range.
+    EnumSet<SagaErrorCode> excluded =
+        EnumSet.of(
+            // Emitted on gRPC by the interceptors through GrpcErrorMapper.close, never by this
+            // dispatch; the interceptor tests pin their status and reason.
+            SagaErrorCode.UNAUTHENTICATED,
+            SagaErrorCode.PERMISSION_DENIED,
+            SagaErrorCode.SERVICE_UNAVAILABLE,
+            // REST-only: the unmatched-route 404 body.
+            SagaErrorCode.ENDPOINT_NOT_FOUND,
+            // Produced only by the client SDK; this server never emits them.
+            SagaErrorCode.SERVER_UNREACHABLE,
+            SagaErrorCode.REQUEST_TIMEOUT,
+            SagaErrorCode.REQUEST_ABORTED,
+            SagaErrorCode.UNRECOGNIZED_SERVER_ERROR,
+            SagaErrorCode.UNRECOGNIZED_RETRYABLE_SERVER_ERROR,
+            SagaErrorCode.UNMAPPED_SERVER_STATUS,
+            SagaErrorCode.SAGA_AWAIT_TIMEOUT,
+            // Reserved, produced nowhere yet (see SagaErrorCode).
+            SagaErrorCode.STEP_TIMEOUT,
+            SagaErrorCode.STEP_USER_FAILURE,
+            // Logged when a compensation fails, never a top-level error response.
+            SagaErrorCode.COMPENSATION_FAILED);
+
+    Set<SagaErrorCode> covered =
+        allArms().stream()
+            .map(Arm::code)
+            .collect(Collectors.toCollection(() -> EnumSet.noneOf(SagaErrorCode.class)));
+
+    assertThat(covered)
+        .as("every SagaErrorCode needs a dispatch-table row or a commented exclusion above")
+        .isEqualTo(EnumSet.complementOf(excluded));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void statusCodeReference_everyDocumentedStatus_isOneThisMapperProduces() {
+    // Arrange — the dispatch arms, which the golden-table test pins, plus the interceptor refusals,
+    // which answer through close() instead.
+    Map<SagaErrorCode, Set<Status.Code>> produced = new EnumMap<>(SagaErrorCode.class);
+    for (Arm arm : allArms()) {
+      produced
+          .computeIfAbsent(arm.code(), c -> EnumSet.noneOf(Status.Code.class))
+          .add(arm.status());
+    }
+    List<SagaErrorCode> refusals =
+        List.of(
+            SagaErrorCode.UNAUTHENTICATED,
+            SagaErrorCode.PERMISSION_DENIED,
+            SagaErrorCode.SERVICE_UNAVAILABLE,
+            SagaErrorCode.RATE_LIMIT_EXCEEDED,
+            SagaErrorCode.INTERNAL_ERROR);
+
+    // Act
+    for (SagaErrorCode code : refusals) {
+      io.grpc.ServerCall<Object, Object> call = org.mockito.Mockito.mock(io.grpc.ServerCall.class);
+      org.mockito.ArgumentCaptor<Status> status = org.mockito.ArgumentCaptor.forClass(Status.class);
+      GrpcErrorMapper.close(call, code);
+      org.mockito.Mockito.verify(call).close(status.capture(), org.mockito.ArgumentMatchers.any());
+      produced
+          .computeIfAbsent(code, c -> EnumSet.noneOf(Status.Code.class))
+          .add(status.getValue().getCode());
+    }
+
+    // Assert
+    for (Map.Entry<SagaErrorCode, StatusCodeReference.Entry> e :
+        StatusCodeReference.ENTRIES.entrySet()) {
+      assertThat(produced.getOrDefault(e.getKey(), Set.of()))
+          .as("gRPC statuses the status-code page lists for %s", e.getKey())
+          .containsAll(e.getValue().grpc());
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void close_unmappedCodeGiven_throwsIllegalArgumentException() {
+    // Arrange — only the interceptor refusal codes have precomputed payloads; any other code at
+    // this entry point is an interceptor wiring bug that must be loud, not a silent default.
+    io.grpc.ServerCall<Object, Object> call = org.mockito.Mockito.mock(io.grpc.ServerCall.class);
+
+    // Act & Assert
+    org.assertj.core.api.Assertions.assertThatThrownBy(
+            () -> GrpcErrorMapper.close(call, SagaErrorCode.SAGA_NOT_FOUND))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
   void toStatusRuntimeException_preconditionGiven_carriesCodeAsReasonNotDescription() {
     StatusRuntimeException e =
         GrpcErrorMapper.toStatusRuntimeException(
-            new SagaStatePreconditionException(
-                "s-1", SagaStatePreconditionException.Code.SAGA_WRONG_STATE, "wrong state"));
+            SagaStatePreconditionException.wrongState("s-1", "RUNNING", "recover"));
 
     assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.FAILED_PRECONDITION);
-    // The code moved off the description onto the reason; the description is a daemon-owned
-    // literal.
-    assertThat(e.getStatus().getDescription())
-        .isEqualTo("The saga is not in a state that allows this operation");
-    assertThat(errorInfo(e).getReason()).isEqualTo("SAGA_WRONG_STATE");
+    ErrorInfo info = errorInfo(e);
+    assertThat(info.getReason()).isEqualTo(SagaErrorCode.SAGA_WRONG_STATE.code());
+    assertThat(info.getMetadataMap())
+        .containsEntry("saga_id", "s-1")
+        .containsEntry("current_state", "RUNNING")
+        .containsEntry("requested_operation", "recover");
   }
 
-  /** Extracts the {@link ErrorInfo} detail, failing the test if the status carries none. */
-  private static ErrorInfo errorInfo(StatusRuntimeException e) {
-    com.google.rpc.Status status = StatusProto.fromThrowable(e);
-    if (status == null) {
-      throw new AssertionError("status carried no google.rpc.Status details");
+  @Test
+  void toStatusRuntimeException_overloadedGiven_logsNothingAboveDebug() {
+    // A refusal is the cap working as configured, not a failure. It also arrives in storms, so a
+    // line per event — and the fallback arm writes a stack with it — would let any caller turn a
+    // saturated daemon into a log-disk problem. The controller summarizes once a minute instead.
+    try (LogCapture logs = LogCapture.of(GrpcErrorMapper.class)) {
+      // Act
+      for (int i = 0; i < 100; i++) {
+        GrpcErrorMapper.toStatusRuntimeException(new SagaOverloadedException());
+      }
+
+      // Assert
+      assertThat(logs.events())
+          .allSatisfy(
+              event ->
+                  assertThat(event.getLevel().toInt()).isLessThanOrEqualTo(Level.DEBUG.toInt()));
     }
+  }
+
+  @Test
+  void toStatusRuntimeException_overloadedGiven_carriesTheSameWaitRestSends() {
+    // A caller refused for load should not get more help on one transport than the other. The rate
+    // limiter already sends RetryInfo here for its own refusals, so an admission refusal that sent
+    // none would be the odd one out on the same protocol.
+    // Act
+    StatusRuntimeException thrown =
+        GrpcErrorMapper.toStatusRuntimeException(new SagaOverloadedException());
+
+    // Assert
+    RetryInfo retryInfo = requireNonNull(retryInfoOf(thrown));
+    assertThat(
+            retryInfo.getRetryDelay().getSeconds() * 1000
+                + retryInfo.getRetryDelay().getNanos() / 1_000_000)
+        .isEqualTo(ErrorMapper.OVERLOAD_RETRY_AFTER_MILLIS);
+  }
+
+  @Test
+  void toStatusRuntimeException_anyOtherErrorGiven_carriesNoWait() {
+    // The hint is attached where the server has advice, not to every error: this pins that adding
+    // it did not change the shape of the statuses that flow through the same builder.
+    // Act
+    StatusRuntimeException thrown =
+        GrpcErrorMapper.toStatusRuntimeException(new SagaNotFoundException("s-1"));
+
+    // Assert
+    assertThat(retryInfoOf(thrown)).isNull();
+  }
+
+  /** The {@code RetryInfo} detail on a status, or {@code null} when it carries none. */
+  private static @Nullable RetryInfo retryInfoOf(StatusRuntimeException e) {
+    com.google.rpc.Status status = StatusProto.fromThrowable(e);
+    assertThat(status).isNotNull();
     for (Any detail : status.getDetailsList()) {
-      if (detail.is(ErrorInfo.class)) {
+      if (detail.is(RetryInfo.class)) {
         try {
-          return detail.unpack(ErrorInfo.class);
-        } catch (com.google.protobuf.InvalidProtocolBufferException malformed) {
-          throw new AssertionError("malformed ErrorInfo detail", malformed);
+          return detail.unpack(RetryInfo.class);
+        } catch (InvalidProtocolBufferException unpackFailure) {
+          throw new AssertionError("RetryInfo detail did not unpack", unpackFailure);
         }
       }
     }
-    throw new AssertionError("status carried no ErrorInfo detail");
+    return null;
   }
 }

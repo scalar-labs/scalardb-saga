@@ -2,46 +2,58 @@ package com.scalar.db.saga.exception;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.entry;
 
 import org.junit.jupiter.api.Test;
 
 class SagaTimeoutExceptionTest {
 
   @Test
-  void constructor_messageGiven_setsMessage() {
-    // Arrange & Act
-    SagaTimeoutException e = new SagaTimeoutException("saga deadline exceeded");
+  void awaitExpired_sagaIdGiven_carriesAwaitTimeoutCodeAndThatId() {
+    // Arrange & Act — the saga keeps running; only the caller's wait budget expired
+    SagaTimeoutException e = SagaTimeoutException.awaitExpired("s-1");
 
-    // Assert
-    assertThat(e.getMessage()).isEqualTo("saga deadline exceeded");
+    // Assert — the id is on the exception, in its metadata, and in the rendered message: the code's
+    // remediation says to poll the saga by its ID, so the exception has to carry one.
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.SAGA_AWAIT_TIMEOUT);
+    assertThat(e.getSagaId()).isEqualTo("s-1");
+    assertThat(e.getMetadata()).containsExactly(entry("saga_id", "s-1"));
+    assertThat(e.getMessage())
+        .isEqualTo("DB-SAGA-40005: The wait for the saga to finish timed out [saga_id=s-1]");
+    assertThat(e.getCause()).isNull();
   }
 
   @SuppressWarnings("NullAway")
   @Test
-  void constructor_nullMessageGiven_throwsNullPointerException() {
+  void awaitExpired_nullSagaIdGiven_throwsNullPointerException() {
     // Arrange & Act & Assert
-    assertThatThrownBy(() -> new SagaTimeoutException(null))
+    assertThatThrownBy(() -> SagaTimeoutException.awaitExpired(null))
         .isInstanceOf(NullPointerException.class);
   }
 
   @Test
-  void constructor_messageAndCauseGiven_setsBoth() {
+  void requestTimedOut_causeGiven_carriesRequestTimeoutCodeAndCause() {
     // Arrange
-    RuntimeException cause = new RuntimeException("interrupted");
+    RuntimeException cause = new RuntimeException("deadline exceeded");
 
     // Act
-    SagaTimeoutException e = new SagaTimeoutException("saga deadline exceeded", cause);
+    SagaTimeoutException e = SagaTimeoutException.requestTimedOut(cause);
 
     // Assert
-    assertThat(e.getMessage()).isEqualTo("saga deadline exceeded");
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.REQUEST_TIMEOUT);
+    assertThat(e.getMetadata()).isEmpty();
+    assertThat(e.getMessage()).isEqualTo("DB-SAGA-40002: The request to the saga server timed out");
     assertThat(e.getCause()).isSameAs(cause);
+    // No saga in view on this path: it is mapped from a bare transport status, so there is no id to
+    // hand back and the accessor says so rather than inventing one.
+    assertThat(e.getSagaId()).isNull();
   }
 
   @SuppressWarnings("NullAway")
   @Test
-  void constructor_nullCauseGiven_throwsNullPointerException() {
+  void requestTimedOut_nullCauseGiven_throwsNullPointerException() {
     // Arrange & Act & Assert
-    assertThatThrownBy(() -> new SagaTimeoutException("timeout", null))
+    assertThatThrownBy(() -> SagaTimeoutException.requestTimedOut(null))
         .isInstanceOf(NullPointerException.class);
   }
 

@@ -4,12 +4,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.math.BigDecimal;
 import java.net.ConnectException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -25,6 +27,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import javax.net.ssl.SSLHandshakeException;
@@ -56,6 +59,8 @@ class HttpExchangeTest {
           ex.close();
         });
     server.createContext("/malformed", ex -> respond(ex, 200, "not json"));
+    server.createContext(
+        "/decimal", ex -> respond(ex, 200, "{\"price\":12345678901234567.89,\"count\":2}"));
     server.createContext("/fail503", ex -> respond(ex, 503, "{}"));
     server.createContext("/fail422", ex -> respond(ex, 422, "{}"));
     server.start();
@@ -156,6 +161,19 @@ class HttpExchangeTest {
 
     assertThat(response.status()).isEqualTo(200);
     assertThat(response.bodyJsonObject()).containsEntry("k", "v");
+  }
+
+  @Test
+  void exchange_decimalInResponse_decodesAsExactBigDecimal() throws Exception {
+    // Act
+    HttpCallResponse response =
+        exchange.exchange(
+            "GET", baseUrl, "/decimal", NO_PARAMS, NO_PARAMS, null, null, "saga-1", "step", null);
+
+    // Assert — exact, as the saga context keeps it; integers stay integers.
+    assertThat(response.bodyJsonObject())
+        .containsEntry("price", new BigDecimal("12345678901234567.89"))
+        .containsEntry("count", 2);
   }
 
   @Test
@@ -319,6 +337,35 @@ class HttpExchangeTest {
   void exchange_ambiguousIoException_notKnownNotCommitted() {
     // A mid-flight reset / unrecognized I/O failure may have committed → not proven.
     assertThat(knownNotCommittedAfterSendFails(new IOException("connection reset"))).isFalse();
+  }
+
+  @Test
+  void exchange_submissionRejected_knownNotCommitted() {
+    // sendAsync itself throwing means the client refused the request before accepting it: the
+    // request provably never went out.
+    HttpClient client = mock(HttpClient.class);
+    doThrow(new RejectedExecutionException("shut down")).when(client).sendAsync(any(), any());
+    com.scalar.db.saga.transport.HttpExchange ex =
+        new com.scalar.db.saga.transport.HttpExchange(client, OutboundHttpPolicy.allowAll());
+
+    Throwable t =
+        catchThrowable(
+            () ->
+                ex.exchange(
+                    "GET", baseUrl, "/ok", NO_PARAMS, NO_PARAMS, null, null, "saga-1", "s", null));
+
+    assertThat(t).isInstanceOf(HttpCallException.class);
+    assertThat(((HttpCallException) t).isRetryable()).isTrue();
+    assertThat(((HttpCallException) t).knownNotCommitted()).isTrue();
+  }
+
+  @Test
+  void exchange_rejectionSurfacedThroughFuture_notKnownNotCommitted() {
+    // A rejection surfacing through the future is not proof of pre-send: the client accepted the
+    // request, and an executor shut down mid-exchange can reject continuation work (e.g. response
+    // processing) after the request was transmitted → in-doubt, retryable.
+    assertThat(knownNotCommittedAfterSendFails(new RejectedExecutionException("shut down")))
+        .isFalse();
   }
 
   @Test

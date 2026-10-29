@@ -61,16 +61,23 @@ class HmacUtilsTest {
 
   @Test
   void callbackSignedData_lengthPrefixesEachVariableField() {
-    assertThat(HmacUtils.callbackSignedData("saga-1", "debit", "1000"))
-        .isEqualTo("6:saga-1:5:debit:1000");
+    assertThat(HmacUtils.callbackSignedData("saga-1", "debit", HmacUtils.COMPLETE, "1000"))
+        .isEqualTo("6:saga-1:5:debit:8:complete:1000");
+  }
+
+  @Test
+  void callbackSignedData_differentActions_produceDistinctData() {
+    // A token is good on its own route only, so the completion and failure tokens must differ.
+    assertThat(HmacUtils.callbackSignedData("saga-1", "debit", HmacUtils.COMPLETE, "1"))
+        .isNotEqualTo(HmacUtils.callbackSignedData("saga-1", "debit", HmacUtils.FAIL, "1"));
   }
 
   @Test
   void callbackSignedData_boundaryAmbiguousTuples_produceDistinctData() {
     // Without length prefixing, (a:b, c) and (a, b:c) both serialize to "a:b:c:1", so a token
     // minted for one saga or step would validate for the other. The prefix keeps them distinct.
-    String data1 = HmacUtils.callbackSignedData("a:b", "c", "1");
-    String data2 = HmacUtils.callbackSignedData("a", "b:c", "1");
+    String data1 = HmacUtils.callbackSignedData("a:b", "c", HmacUtils.COMPLETE, "1");
+    String data2 = HmacUtils.callbackSignedData("a", "b:c", HmacUtils.COMPLETE, "1");
     assertThat(data1).isNotEqualTo(data2);
     assertThat(HmacUtils.hmacSha256Hex("secret", data1))
         .isNotEqualTo(HmacUtils.hmacSha256Hex("secret", data2));
@@ -78,7 +85,7 @@ class HmacUtilsTest {
 
   @Test
   void callbackSignedData_sameTuple_isDeterministic() {
-    assertThat(HmacUtils.callbackSignedData("a:b", "c", "1"))
-        .isEqualTo(HmacUtils.callbackSignedData("a:b", "c", "1"));
+    assertThat(HmacUtils.callbackSignedData("a:b", "c", HmacUtils.COMPLETE, "1"))
+        .isEqualTo(HmacUtils.callbackSignedData("a:b", "c", HmacUtils.COMPLETE, "1"));
   }
 }

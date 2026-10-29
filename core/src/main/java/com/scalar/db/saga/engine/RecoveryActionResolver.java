@@ -56,14 +56,14 @@ final class RecoveryActionResolver {
     // hasUnresolvedPrePivotFailure for why resuming there would orphan a committed side effect.
     int pivotIndex = def.getPivotIndex();
     if (hasUnresolvedPrePivotFailure(events, pivotIndex)) {
-      int fromStep =
+      int fromStepIndex =
           Math.max(
               stepIndices(events, EventType.STEP_COMPLETED).max().orElse(-1),
               failedIndicesToCompensate(events)
                   .filter(index -> index <= pivotIndex)
                   .max()
                   .orElse(-1));
-      return new RecoveryAction.Compensate(fromStep);
+      return new RecoveryAction.Compensate(fromStepIndex);
     }
 
     int lastCompleted = stepIndices(events, EventType.STEP_COMPLETED).max().orElse(-1);
@@ -79,8 +79,8 @@ final class RecoveryActionResolver {
    * completed step, or the highest forward failure not proven undelivered (a {@code
    * knownNotCommitted} failure is skipped).
    *
-   * <p>Unlike the forward path in {@link #resolve}, this does not clamp {@code fromStep} to the
-   * pivot, and does not need to: a saga reaches {@code COMPENSATING} only through a pre-pivot
+   * <p>Unlike the forward path in {@link #resolve}, this does not clamp {@code fromStepIndex} to
+   * the pivot, and does not need to: a saga reaches {@code COMPENSATING} only through a pre-pivot
    * forward failure, so every completed or failed index here is already at or before the pivot. If
    * a future path (most likely a manual cancel or abort API) ever drove a past-the-pivot saga into
    * {@code COMPENSATING}, that assumption would break. Such a saga cannot be cleanly rolled back,

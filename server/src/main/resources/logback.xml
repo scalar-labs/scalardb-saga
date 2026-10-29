@@ -26,6 +26,13 @@
     <resetJUL>true</resetJUL>
   </contextListener>
 
+  <!--
+    Jetty 12.1 warns at startup that the HTTP thread pool's queue is bounded. The bound is
+    deliberate (scalar.db.saga.server.http.max_queued_requests), so only that one message is
+    dropped; the pool's other warnings still log.
+  -->
+  <turboFilter class="com.scalar.db.saga.server.BoundedQueueWarningFilter" />
+
   <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
     <encoder>
       <pattern>%d{yyyy-MM-dd'T'HH:mm:ss.SSS'Z', UTC} %-5level [%thread] %logger{40} - %msg%n</pattern>

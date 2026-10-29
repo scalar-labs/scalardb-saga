@@ -9,6 +9,7 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -25,6 +26,7 @@ import com.scalar.db.saga.api.StepResult;
 import com.scalar.db.saga.api.TccStep;
 import com.scalar.db.saga.definition.RetryPolicy;
 import com.scalar.db.saga.definition.SagaDefinition;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.StepCompensationException;
 import com.scalar.db.saga.exception.StepExecutionException;
 import com.scalar.db.saga.store.EventType;
@@ -32,13 +34,18 @@ import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.StatusEvent;
 import com.scalar.db.saga.store.StepEvent;
+import com.scalar.db.saga.transport.HttpEndpointManager;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
@@ -71,9 +78,10 @@ class SagaEngineTest {
     engine =
         new SagaEngine(
             store,
-            new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
+            new StepInstantiator(stepResolver, HttpEndpointManager.create(Map.of())),
             OWNER_ID,
             new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
+            0,
             Clock.systemUTC());
   }
 
@@ -96,12 +104,11 @@ class SagaEngineTest {
   }
 
   private SagaStateSnapshot runningSnapshot(String sagaId) {
-    return new SagaStateSnapshot(sagaId, "test-saga", SagaStatus.RUNNING, OWNER_ID, "v1", NOW, NOW);
+    return new SagaStateSnapshot(sagaId, "test-saga", SagaStatus.RUNNING, "v1", NOW, NOW);
   }
 
   private SagaStateSnapshot compensatingSnapshot(String sagaId) {
-    return new SagaStateSnapshot(
-        sagaId, "test-saga", SagaStatus.COMPENSATING, OWNER_ID, "v1", NOW, NOW);
+    return new SagaStateSnapshot(sagaId, "test-saga", SagaStatus.COMPENSATING, "v1", NOW, NOW);
   }
 
   private Step successStep(String name) {
@@ -182,6 +189,21 @@ class SagaEngineTest {
       // Assert
       assertThat(result).isEqualTo(expected);
       verify(store).createSaga("saga-1", "test-saga", OWNER_ID, Map.of(), "1.0");
+    }
+
+    @Test
+    void createSaga_inputWithANullValue_throwsBeforePersisting() {
+      // Arrange — a null value cannot live in a saga context, and a JSON null in a request body
+      // produces one. Validation used to run only when execution began, so an asynchronous caller
+      // got a saga id, waited out its full bound, and a doomed saga was left in the store.
+      SagaDefinition def = sagaDefinition("s1");
+      Map<String, Object> input = new HashMap<>();
+      input.put("k", null);
+
+      // Act & Assert: INVALID_ARGUMENT so the wire layers render it 400, not 500.
+      assertThatThrownBy(() -> engine.createSaga(def, "saga-1", input))
+          .isInstanceOf(SagaIllegalArgumentException.class);
+      verify(store, never()).createSaga(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -338,9 +360,10 @@ class SagaEngineTest {
       SagaEngine clockEngine =
           new SagaEngine(
               store,
-              new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
+              new StepInstantiator(stepResolver, HttpEndpointManager.create(Map.of())),
               OWNER_ID,
               new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
+              0,
               fixedClock);
       Step step1 = mock(Step.class);
       when(step1.getName()).thenReturn("s1");
@@ -389,8 +412,7 @@ class SagaEngineTest {
       SagaDefinition def = sagaDefinitionWithRetry("s0", "s1", "s2");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
       SagaStateSnapshot completedSaga =
-          new SagaStateSnapshot(
-              "saga-1", "test-saga", SagaStatus.COMPLETED, OWNER_ID, "v1", NOW, NOW);
+          new SagaStateSnapshot("saga-1", "test-saga", SagaStatus.COMPLETED, "v1", NOW, NOW);
       when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(completedSaga);
       ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
 
@@ -740,13 +762,14 @@ class SagaEngineTest {
       // t=200: step deadline calculation for step 0
       // t=300: executeWithRetry for step 0
       // t=1100: timeout check for step 1 (expired, 1100 > 1000)
-      when(mockClock.millis()).thenReturn(0L, 100L, 200L, 300L, 1100L);
+      when(mockClock.millis()).thenReturn(0L, 0L, 100L, 200L, 300L, 1100L);
       SagaEngine clockEngine =
           new SagaEngine(
               store,
-              new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
+              new StepInstantiator(stepResolver, HttpEndpointManager.create(Map.of())),
               OWNER_ID,
               new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
+              0,
               mockClock);
 
       Step step0 = successStep("s0");
@@ -788,6 +811,7 @@ class SagaEngineTest {
       // Arrange — clock advances past saga deadline after the pivot
       Clock mockClock = mock(Clock.class);
       // Timeline: saga starts at t=0, deadline = 0+1000 = 1000ms
+      // t=0:   registering the drive (records when this instance started it)
       // t=100: timeout check for step 0 (OK)
       // t=200: step deadline for step 0
       // t=300: executeWithRetry for step 0
@@ -795,13 +819,14 @@ class SagaEngineTest {
       // t=500: step deadline for step 1
       // t=600: executeWithRetry for step 1
       // t=1100: timeout check for step 2 (expired, 1100 > 1000)
-      when(mockClock.millis()).thenReturn(0L, 100L, 200L, 300L, 400L, 500L, 600L, 1100L);
+      when(mockClock.millis()).thenReturn(0L, 0L, 100L, 200L, 300L, 400L, 500L, 600L, 1100L);
       SagaEngine clockEngine =
           new SagaEngine(
               store,
-              new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
+              new StepInstantiator(stepResolver, HttpEndpointManager.create(Map.of())),
               OWNER_ID,
               new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
+              0,
               mockClock);
 
       Step step0 = successStep("s0");
@@ -840,6 +865,188 @@ class SagaEngineTest {
       verify(store, never())
           .recordStatusEvent(any(), anyInt(), eq(StatusEvent.compensating()), any());
     }
+
+    @Test
+    void executeSaga_withDefaultSagaTimeout_definitionWithoutTimeoutTimesOut() throws Exception {
+      // Arrange — the definition sets no timeout; the engine-level default supplies the deadline.
+      Clock mockClock = mock(Clock.class);
+      // Timeline: saga starts at t=0, default deadline = 0+1000 = 1000ms
+      // t=100: timeout check for step 0 (not expired)
+      // t=200: step deadline calculation for step 0
+      // t=300: executeWithRetry for step 0
+      // t=1100: timeout check for step 1 (expired, 1100 > 1000)
+      when(mockClock.millis()).thenReturn(0L, 0L, 100L, 200L, 300L, 1100L);
+      SagaEngine clockEngine =
+          new SagaEngine(
+              store,
+              new StepInstantiator(stepResolver, HttpEndpointManager.create(Map.of())),
+              OWNER_ID,
+              new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
+              1000,
+              mockClock);
+
+      Step step0 = successStep("s0");
+      Step step1 = successStep("s1");
+      registerStep("s0", step0);
+      registerStep("s1", step1);
+
+      // No timeoutMillis on the definition — only the engine default can bound this saga
+      SagaDefinition def =
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
+              .step("s0", "com.example.s0")
+              .add()
+              .step("s1", "com.example.s1")
+              .add()
+              .build();
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
+
+      // Act
+      clockEngine.executeSaga(def, saga, Map.of());
+      clockEngine.close();
+
+      // Assert — identical to a definition-level timeout: step 1 skipped, compensation ran
+      verify(step0).execute(any(SagaContext.class));
+      verify(step1, never()).execute(any(SagaContext.class));
+      ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
+      verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture(), any());
+      assertThat(transitionCaptor.getAllValues().get(0).getEventType())
+          .isEqualTo(EventType.SAGA_COMPENSATING);
+      assertThat(transitionCaptor.getAllValues().get(1).getEventType())
+          .isEqualTo(EventType.SAGA_COMPENSATED);
+    }
+
+    @Test
+    void executeSaga_withDefaultSagaTimeout_definitionTimeoutWins() throws Exception {
+      // Arrange — the definition's own 5000ms timeout must win over a shorter 1000ms default: at
+      // t=1100 the saga is past the default but within its own deadline, so step 1 still runs.
+      Clock mockClock = mock(Clock.class);
+      when(mockClock.millis()).thenReturn(0L, 0L, 100L, 200L, 300L, 1100L, 1200L, 1300L);
+      SagaEngine clockEngine =
+          new SagaEngine(
+              store,
+              new StepInstantiator(stepResolver, HttpEndpointManager.create(Map.of())),
+              OWNER_ID,
+              new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
+              1000,
+              mockClock);
+
+      Step step0 = successStep("s0");
+      Step step1 = successStep("s1");
+      registerStep("s0", step0);
+      registerStep("s1", step1);
+
+      SagaDefinition def =
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
+              .timeoutMillis(5000)
+              .step("s0", "com.example.s0")
+              .add()
+              .step("s1", "com.example.s1")
+              .add()
+              .build();
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
+
+      // Act
+      clockEngine.executeSaga(def, saga, Map.of());
+      clockEngine.close();
+
+      // Assert — both steps executed; no compensation
+      verify(step0).execute(any(SagaContext.class));
+      verify(step1).execute(any(SagaContext.class));
+      verify(store, never())
+          .recordStatusEvent(any(), anyInt(), eq(StatusEvent.compensating()), any());
+    }
+
+    @Test
+    void resumeFrom_withDefaultSagaTimeout_enforcesDefaultOnResume() throws Exception {
+      // Arrange — a recovery resume from step 1 with the default deadline already expired. The
+      // default is applied at deadline computation on every execution entry, so the resumed drive
+      // times out and compensates instead of running the step with no deadline at all.
+      Clock mockClock = mock(Clock.class);
+      // Timeline: resume at t=0, default deadline = 0+1000 = 1000ms; t=1100: step 1 check expired
+      when(mockClock.millis()).thenReturn(0L, 0L, 1100L);
+      SagaEngine clockEngine =
+          new SagaEngine(
+              store,
+              new StepInstantiator(stepResolver, HttpEndpointManager.create(Map.of())),
+              OWNER_ID,
+              new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
+              1000,
+              mockClock);
+
+      Step step0 = successStep("s0");
+      Step step1 = successStep("s1");
+      registerStep("s0", step0);
+      registerStep("s1", step1);
+
+      SagaDefinition def =
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
+              .step("s0", "com.example.s0")
+              .add()
+              .step("s1", "com.example.s1")
+              .add()
+              .build();
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
+
+      // Act
+      clockEngine.resumeFrom(def, context, 1);
+      clockEngine.close();
+
+      // Assert — the resumed step never ran; the drive timed out on the default deadline
+      verify(step1, never()).execute(any(SagaContext.class));
+      ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
+      verify(store, atLeastOnce())
+          .recordStatusEvent(any(), anyInt(), transitionCaptor.capture(), any());
+      assertThat(transitionCaptor.getAllValues().get(0).getEventType())
+          .isEqualTo(EventType.SAGA_COMPENSATING);
+    }
+
+    @Test
+    void executeSaga_stepReturnsPendingWithDefaultSagaTimeout_parksWithBoundedDeadline()
+        throws Exception {
+      // Arrange — a fixed clock so the parked deadline is deterministic. The definition sets no
+      // timeout; the engine-level default must bound the park deadline exactly like a
+      // definition-level timeout would, giving deadline = now + default timeout.
+      Clock fixedClock = Clock.fixed(NOW, ZoneOffset.UTC);
+      SagaEngine clockEngine =
+          new SagaEngine(
+              store,
+              new StepInstantiator(stepResolver, HttpEndpointManager.create(Map.of())),
+              OWNER_ID,
+              new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
+              60_000,
+              fixedClock);
+      Step step1 = mock(Step.class);
+      when(step1.getName()).thenReturn("s1");
+      when(step1.execute(any(SagaContext.class))).thenReturn(StepResult.pending());
+      registerStep("s1", step1);
+      SagaDefinition def =
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
+              .defaultRetryPolicy(fastRetryPolicy())
+              .step("s1", "com.example.s1")
+              .add()
+              .build();
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      when(store.park(any(), anyInt(), any(StepEvent.class), any())).thenReturn(saga);
+
+      // Act
+      clockEngine.executeSaga(def, saga, Map.of());
+      clockEngine.close();
+
+      // Assert — parked with a deadline of exactly now + default timeout (the class step
+      // contributes no bound of its own)
+      ArgumentCaptor<Instant> deadlineCaptor = ArgumentCaptor.forClass(Instant.class);
+      verify(store).park(any(), anyInt(), any(StepEvent.class), deadlineCaptor.capture());
+      assertThat(deadlineCaptor.getValue())
+          .isEqualTo(Instant.ofEpochMilli(NOW.toEpochMilli() + 60_000));
+    }
   }
 
   // =========================================================================
@@ -849,16 +1056,37 @@ class SagaEngineTest {
   @Nested
   class GracefulShutdown {
 
+    /**
+     * Blocks until the shutting-down flag is up. shutdown() raises it, then sleeps in a loop until
+     * the active set empties, so a thread parked in that sleep is the first observable state that
+     * proves the flag the drive is about to read is already set.
+     */
+    private static void awaitDraining(Thread shutdownThread) {
+      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+      while (shutdownThread.getState() != Thread.State.TIMED_WAITING) {
+        if (System.nanoTime() > deadline) {
+          throw new AssertionError("shutdown() never reached its drain poll");
+        }
+        Thread.onSpinWait();
+      }
+    }
+
     @Test
     void executeSaga_shuttingDownWaitCurrentStep_stopsBetweenSteps() throws Exception {
-      // Arrange
+      // Arrange — drive the saga on a background thread and block it inside its first step, so
+      // shutdown() runs concurrently with the drive instead of from inside it. The concurrency is
+      // the point: called on the drive's own thread, shutdown() can never see the active set empty,
+      // so its marking loop stamps the saga too and the assertion below would hold even with the
+      // hand-off in executeSteps deleted.
+      CountDownLatch stepStarted = new CountDownLatch(1);
+      CountDownLatch stepRelease = new CountDownLatch(1);
       Step step1 = mock(Step.class);
       when(step1.getName()).thenReturn("s1");
       when(step1.execute(any(SagaContext.class)))
           .thenAnswer(
               invocation -> {
-                // Trigger shutdown during step1 execution
-                engine.shutdown();
+                stepStarted.countDown();
+                stepRelease.await();
                 return StepResult.empty();
               });
       Step step2 = successStep("s2");
@@ -873,20 +1101,38 @@ class SagaEngineTest {
       engine =
           new SagaEngine(
               store,
-              new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
+              new StepInstantiator(stepResolver, HttpEndpointManager.create(Map.of())),
               OWNER_ID,
               new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
+              0,
               Clock.systemUTC());
 
-      // Act
-      engine.executeSaga(def, saga, Map.of());
+      Thread sagaThread = new Thread(() -> engine.executeSaga(def, saga, Map.of()));
+      sagaThread.start();
+      stepStarted.await();
+
+      // Act — shut down from another thread, and release the step only once that thread is polling
+      // for the drain. Releasing earlier would race the flag, and step2 could slip through.
+      Thread shutdownThread = new Thread(engine::shutdown);
+      shutdownThread.start();
+      awaitDraining(shutdownThread);
+      stepRelease.countDown();
+      sagaThread.join(5000);
+      shutdownThread.join(5000);
 
       // Assert — step2 never executed (stopped between steps)
       verify(step2, never()).execute(any(SagaContext.class));
+      // ...and the drive itself handed the saga to the sweeper. It returns between steps and
+      // unregisters while the drain is still polling, so the drain finds an empty set and marks
+      // nothing: this single call is the hand-off in executeSteps and nothing else. Without it the
+      // saga would sit RUNNING with a freshly written step event, which recovery reads as recently
+      // driven and skips for a whole timeout — stalling exactly the long-running sagas a graceful
+      // drain exists to hand over promptly.
+      verify(store, times(1)).markForRecovery(saga.getSagaId());
     }
 
     @Test
-    void executeSaga_alreadyActive_marksForRecoveryAndSkipsExecution() throws Exception {
+    void executeSaga_alreadyActive_skipsExecutionWithoutMarkingForRecovery() throws Exception {
       // Arrange — start saga-1 on a background thread and block it
       CountDownLatch stepStarted = new CountDownLatch(1);
       CountDownLatch stepRelease = new CountDownLatch(1);
@@ -911,8 +1157,10 @@ class SagaEngineTest {
       // Act — attempt to execute the same saga again
       engine.executeSaga(def, saga, Map.of());
 
-      // Assert — duplicate was rejected and marked for recovery
-      verify(store).markForRecovery("saga-1");
+      // Assert — the duplicate was rejected, and the live drive was left alone. Marking here
+      // would append a hand-off at the sequence the running drive writes next, stopping it: a
+      // duplicate dispatch must not halt a healthy saga.
+      verify(store, never()).markForRecovery(any());
       // Only one step execution (the original, not the duplicate)
       verify(step1, times(1)).execute(any(SagaContext.class));
 
@@ -922,7 +1170,40 @@ class SagaEngineTest {
     }
 
     @Test
-    void resumeFrom_alreadyActive_marksForRecoveryAndReturnsCurrentState() throws Exception {
+    void isLocallyActive_whileDriving_isTrueAndBecomesFalseWhenTheDriveEnds() throws Exception {
+      // Arrange — start saga-1 on a background thread and block it inside its step
+      CountDownLatch stepStarted = new CountDownLatch(1);
+      CountDownLatch stepRelease = new CountDownLatch(1);
+      Step step1 = mock(Step.class);
+      when(step1.getName()).thenReturn("s1");
+      when(step1.execute(any(SagaContext.class)))
+          .thenAnswer(
+              invocation -> {
+                stepStarted.countDown();
+                stepRelease.await();
+                return StepResult.empty();
+              });
+      registerStep("s1", step1);
+      SagaDefinition def = sagaDefinitionWithRetry("s1");
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
+
+      Thread sagaThread = new Thread(() -> engine.executeSaga(def, saga, Map.of()));
+      sagaThread.start();
+      stepStarted.await();
+
+      // Act & Assert — true only for the saga this instance is driving
+      assertThat(engine.isLocallyActive("saga-1")).isTrue();
+      assertThat(engine.isLocallyActive("saga-unknown")).isFalse();
+
+      // Act & Assert — the drive's finally clears it, so recovery stops skipping the saga
+      stepRelease.countDown();
+      sagaThread.join(5000);
+      assertThat(engine.isLocallyActive("saga-1")).isFalse();
+    }
+
+    @Test
+    void resumeFrom_alreadyActive_returnsCurrentStateWithoutMarkingForRecovery() throws Exception {
       // Arrange — start saga-1 on a background thread and block it
       CountDownLatch stepStarted = new CountDownLatch(1);
       CountDownLatch stepRelease = new CountDownLatch(1);
@@ -948,8 +1229,9 @@ class SagaEngineTest {
       ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
       SagaStateSnapshot result = engine.resumeFrom(def, context, 0);
 
-      // Assert — duplicate was rejected, returns current state unchanged
-      verify(store).markForRecovery("saga-1");
+      // Assert — duplicate rejected and current state returned unchanged, with the live drive
+      // left alone (see executeSaga_alreadyActive_... for why marking would be harmful).
+      verify(store, never()).markForRecovery(any());
       assertThat(result).isEqualTo(saga);
 
       // Cleanup
@@ -958,7 +1240,8 @@ class SagaEngineTest {
     }
 
     @Test
-    void compensateFrom_alreadyActive_marksForRecoveryAndSkipsCompensation() throws Exception {
+    void compensateFrom_alreadyActive_skipsCompensationWithoutMarkingForRecovery()
+        throws Exception {
       // Arrange — start saga-1 on a background thread and block it
       CountDownLatch stepStarted = new CountDownLatch(1);
       CountDownLatch stepRelease = new CountDownLatch(1);
@@ -984,8 +1267,9 @@ class SagaEngineTest {
       ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
       engine.compensateFrom(def, context, 0);
 
-      // Assert — duplicate was rejected and marked for recovery
-      verify(store).markForRecovery("saga-1");
+      // Assert — duplicate rejected, live drive left alone (marking would rewrite the clustering
+      // key the running drive holds and kill it).
+      verify(store, never()).markForRecovery(any());
       // No compensation was triggered
       verify(step1, never()).compensate(any(SagaContext.class));
       // No status transitions recorded for the duplicate
@@ -1055,9 +1339,10 @@ class SagaEngineTest {
       engine =
           new SagaEngine(
               store,
-              new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
+              new StepInstantiator(stepResolver, HttpEndpointManager.create(Map.of())),
               OWNER_ID,
               new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_ALL_SAGAS, 50),
+              0,
               Clock.systemUTC()); // 50ms timeout
 
       // Start saga in background and wait until it's actively running
@@ -1069,6 +1354,133 @@ class SagaEngineTest {
       engine.shutdown();
 
       // Assert — saga still active when timeout expired, so marked for recovery
+      verify(store).markForRecovery("saga-1");
+      sagaThread.join(5000);
+    }
+
+    @Test
+    void shutdown_severalSagasStillActive_marksThemAllConcurrently() throws Exception {
+      // Arrange — three sagas blocked mid-step, and a store whose mark returns only once all three
+      // marks are in flight at the same time: marked one after another, the first would wait
+      // alone until the barrier timed out, so every mark passing proves they ran concurrently
+      int sagaCount = 3;
+      CountDownLatch stepsStarted = new CountDownLatch(sagaCount);
+      Step step1 = mock(Step.class);
+      when(step1.getName()).thenReturn("s1");
+      when(step1.execute(any(SagaContext.class)))
+          .thenAnswer(
+              invocation -> {
+                stepsStarted.countDown();
+                Thread.sleep(2_000);
+                return StepResult.empty();
+              });
+      registerStep("s1", step1);
+      SagaDefinition def = sagaDefinitionWithRetry("s1");
+      when(store.recordStatusEvent(any(), anyInt(), any(), any()))
+          .thenAnswer(invocation -> invocation.getArgument(0));
+      CyclicBarrier allMarking = new CyclicBarrier(sagaCount);
+      AtomicInteger marksPassed = new AtomicInteger();
+      doAnswer(
+              invocation -> {
+                allMarking.await(5, TimeUnit.SECONDS);
+                marksPassed.incrementAndGet();
+                return null;
+              })
+          .when(store)
+          .markForRecovery(anyString());
+      List<Thread> sagaThreads = new ArrayList<>();
+      for (int i = 1; i <= sagaCount; i++) {
+        SagaStateSnapshot saga = runningSnapshot("saga-" + i);
+        Thread thread = new Thread(() -> engine.executeSaga(def, saga, Map.of()));
+        thread.start();
+        sagaThreads.add(thread);
+      }
+      stepsStarted.await();
+
+      // Act
+      engine.shutdown(0L);
+
+      // Assert
+      assertThat(marksPassed.get()).isEqualTo(sagaCount);
+      for (Thread thread : sagaThreads) {
+        thread.join(5_000);
+      }
+    }
+
+    @Test
+    void beginShutdown_sagaBetweenSteps_stopsBeforeTheNextStep() throws Exception {
+      // Arrange — the flag alone, with no wait: a saga whose first step is running when it is set
+      // must not start its second step, which is what lets a caller stop background managers
+      // after it without their drives spending the budget
+      CountDownLatch firstStepStarted = new CountDownLatch(1);
+      CountDownLatch release = new CountDownLatch(1);
+      Step step1 = mock(Step.class);
+      when(step1.getName()).thenReturn("s1");
+      when(step1.execute(any(SagaContext.class)))
+          .thenAnswer(
+              invocation -> {
+                firstStepStarted.countDown();
+                assertThat(release.await(5, TimeUnit.SECONDS)).isTrue();
+                return StepResult.empty();
+              });
+      Step step2 = mock(Step.class);
+      when(step2.getName()).thenReturn("s2");
+      registerStep("s1", step1);
+      registerStep("s2", step2);
+      SagaDefinition def = sagaDefinitionWithRetry("s1", "s2");
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
+      Thread sagaThread = new Thread(() -> engine.executeSaga(def, saga, Map.of()));
+      sagaThread.start();
+      firstStepStarted.await();
+
+      // Act
+      engine.beginShutdown();
+      release.countDown();
+      sagaThread.join(5_000);
+
+      // Assert
+      verify(step2, never()).execute(any(SagaContext.class));
+    }
+
+    @Test
+    void shutdown_zeroWaitGiven_marksActiveSagasForRecoveryWithoutWaiting() throws Exception {
+      // Arrange — a step that outlasts any wait, on an engine whose own timeout is generous: the
+      // budget the caller hands in must win, and a spent budget must still mark the saga
+      CountDownLatch stepStarted = new CountDownLatch(1);
+      Step step1 = mock(Step.class);
+      when(step1.getName()).thenReturn("s1");
+      when(step1.execute(any(SagaContext.class)))
+          .thenAnswer(
+              invocation -> {
+                stepStarted.countDown();
+                Thread.sleep(500);
+                return StepResult.empty();
+              });
+      registerStep("s1", step1);
+      SagaDefinition def = sagaDefinitionWithRetry("s1");
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
+      engine.close();
+      engine =
+          new SagaEngine(
+              store,
+              new StepInstantiator(stepResolver, HttpEndpointManager.create(Map.of())),
+              OWNER_ID,
+              new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_ALL_SAGAS, 5_000),
+              0,
+              Clock.systemUTC());
+      Thread sagaThread = new Thread(() -> engine.executeSaga(def, saga, Map.of()));
+      sagaThread.start();
+      stepStarted.await();
+
+      // Act
+      long startNanos = System.nanoTime();
+      engine.shutdown(0L);
+      long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+
+      // Assert — no wait was spent, and the saga was marked while the store was still open
+      assertThat(elapsedMillis).isLessThan(2_000L);
       verify(store).markForRecovery("saga-1");
       sagaThread.join(5000);
     }
@@ -1314,6 +1726,9 @@ class SagaEngineTest {
 
     private ExecutionContext createCompensatingContext() {
       SagaStateSnapshot state = compensatingSnapshot("saga-1");
+      // compensateSteps transitions to COMPENSATED on success; return the same snapshot for
+      // simplicity
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(state);
       return new ExecutionContext("saga-1", Map.of(), state);
     }
 
@@ -1371,7 +1786,8 @@ class SagaEngineTest {
     }
 
     @Test
-    void compensateSteps_allRetriesExhausted_appendsFailedEventAndThrows() throws Exception {
+    void compensateSteps_allRetriesExhausted_appendsFailedEventAndStaysCompensating()
+        throws Exception {
       // Arrange
       Step step0 = createStep("step0");
       doThrow(new StepCompensationException("persistent"))
@@ -1380,18 +1796,20 @@ class SagaEngineTest {
       List<StepWithPolicy> plan = createPlan(step0);
       ExecutionContext context = createCompensatingContext();
 
-      // Act & Assert
-      assertThatThrownBy(() -> engine.compensateSteps(plan, context, 0))
-          .isInstanceOf(StepCompensationException.class);
+      // Act
+      engine.compensateSteps(plan, context, 0);
 
-      // Verify all 3 retry attempts were made
+      // Assert — all 3 retry attempts were made
       verify(step0, times(3)).compensate(any(SagaContext.class));
 
-      // Verify STEP_COMPENSATION_FAILED event appended
+      // Assert — STEP_COMPENSATION_FAILED event appended
       ArgumentCaptor<StepEvent> eventCaptor = ArgumentCaptor.forClass(StepEvent.class);
       verify(store).recordStepEvent(eq("saga-1"), anyInt(), eventCaptor.capture());
       assertThat(eventCaptor.getValue().getEventType())
           .isEqualTo(EventType.STEP_COMPENSATION_FAILED);
+
+      // Assert — no SAGA_COMPENSATED transition (stays COMPENSATING for recovery to retry)
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any(StatusEvent.class), any());
     }
 
     @Test
@@ -1424,6 +1842,11 @@ class SagaEngineTest {
       // Assert
       verify(step0, never()).compensate(any(SagaContext.class));
       verify(store, never()).recordStepEvent(anyString(), anyInt(), any(StepEvent.class));
+
+      // Assert — even with nothing to compensate, the saga transitions to COMPENSATED
+      ArgumentCaptor<StatusEvent> statusCaptor = ArgumentCaptor.forClass(StatusEvent.class);
+      verify(store).recordStatusEvent(any(), anyInt(), statusCaptor.capture(), any());
+      assertThat(statusCaptor.getValue().getEventType()).isEqualTo(EventType.SAGA_COMPENSATED);
     }
 
     @Test
@@ -1557,8 +1980,7 @@ class SagaEngineTest {
   class RecordStepCompletedFailure {
 
     @Test
-    void executeSagaSteps_recordStepCompletedThrows_compensatesIncludingCurrentStep()
-        throws Exception {
+    void executeSteps_recordStepCompletedThrows_compensatesIncludingCurrentStep() throws Exception {
       // Arrange — 2 steps, both execute successfully
       Step step0 = successStep("s0");
       Step step1 = successStep("s1");
@@ -1613,7 +2035,7 @@ class SagaEngineTest {
 
     @Test
     void
-        executeSagaSteps_recordStepCompletedThrowsButCompletionPersisted_propagatesWithoutCompensating()
+        executeSteps_recordStepCompletedThrowsButCompletionPersisted_propagatesWithoutCompensating()
             throws Exception {
       // The committed-residual case: recordStepCompleted's ack was lost (the event IS persisted),
       // so
@@ -1668,7 +2090,7 @@ class SagaEngineTest {
     }
 
     @Test
-    void executeSagaSteps_executionFailureKnownNotCommitted_doesNotCompensateCurrentStep()
+    void executeSteps_executionFailureKnownNotCommitted_doesNotCompensateCurrentStep()
         throws Exception {
       // A forward failure the framework PROVED did not commit (knownNotCommitted) compensates from
       // i-1 (only step 0), skipping step 1 — it provably has no side effect to undo.
@@ -1691,7 +2113,7 @@ class SagaEngineTest {
     }
 
     @Test
-    void executeSagaSteps_executionFailureNotKnownNotCommitted_compensatesIncludingCurrentStep()
+    void executeSteps_executionFailureNotKnownNotCommitted_compensatesIncludingCurrentStep()
         throws Exception {
       // The core fix: a forward failure whose non-delivery is NOT proven (the default — e.g. any
       // non-HTTP class step throwing a bare StepExecutionException) may have committed step 1's
@@ -1751,7 +2173,7 @@ class SagaEngineTest {
     }
 
     @Test
-    void executeSagaSteps_recordStepCompletedThrowsPastPivot_noCompensation() throws Exception {
+    void executeSteps_recordStepCompletedThrowsPastPivot_noCompensation() throws Exception {
       // Arrange — MIXED strategy: s0, s1 (pivot), s2 (past pivot)
       Step step0 = successStep("s0");
       Step step1 = successStep("s1");
@@ -1797,7 +2219,7 @@ class SagaEngineTest {
     }
 
     @Test
-    void executeSagaSteps_recordStepCompletedThrowsAndCompensationFails_staysCompensating()
+    void executeSteps_recordStepCompletedThrowsAndCompensationFails_staysCompensating()
         throws Exception {
       // Arrange — 1 step: execution succeeds, recording fails, compensation also fails.
       // Saga should stay COMPENSATING for recovery to retry.

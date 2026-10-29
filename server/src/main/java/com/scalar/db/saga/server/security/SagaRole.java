@@ -23,8 +23,16 @@ import java.util.Optional;
  * {@link #wireName()}.
  */
 public enum SagaRole {
+  /** Reads saga state by id; wire name {@code saga:read}. */
   READ("saga:read", 0),
+
+  /** Starts sagas, and everything {@link #READ} grants; wire name {@code saga:write}. */
   WRITE("saga:write", 1),
+
+  /**
+   * Operator actions (list, recover, force-complete, reset), and everything {@link #WRITE} grants;
+   * wire name {@code saga:admin}.
+   */
   ADMIN("saga:admin", 2);
 
   private final String wireName;
@@ -38,6 +46,8 @@ public enum SagaRole {
   /**
    * Returns the {@code saga:<action>} wire name a provider matches a credential's claims against
    * (e.g. {@code "saga:write"}).
+   *
+   * @return the wire name
    */
   public String wireName() {
     return wireName;
@@ -47,6 +57,9 @@ public enum SagaRole {
    * Returns the role whose {@link #wireName()} equals {@code wireName} (e.g. {@code "saga:write"} →
    * {@link #WRITE}), or empty if none matches. Providers use this to map a credential's claim
    * values (JWT scopes, an API key's configured roles) onto the RBAC roles.
+   *
+   * @param wireName the claim value to match, exactly as the credential carries it
+   * @return the matching role, or empty if the value names none
    */
   public static Optional<SagaRole> fromWireName(String wireName) {
     for (SagaRole role : values()) {
@@ -62,6 +75,9 @@ public enum SagaRole {
    * {@link #ADMIN} &gt; {@link #WRITE} &gt; {@link #READ} hierarchy. For example {@code
    * ADMIN.implies(READ)} is {@code true}; {@code READ.implies(WRITE)} is {@code false}. A role
    * always implies itself.
+   *
+   * @param required the role an operation requires
+   * @return {@code true} if this role is {@code required} or ranks above it
    */
   public boolean implies(SagaRole required) {
     // Higher privilege grants everything at or below it (READ=0 < WRITE=1 < ADMIN=2). An explicit

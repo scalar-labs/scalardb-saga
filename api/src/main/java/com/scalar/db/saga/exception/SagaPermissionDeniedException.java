@@ -12,13 +12,23 @@ import java.util.Objects;
  */
 public class SagaPermissionDeniedException extends SagaRuntimeException {
 
-  public SagaPermissionDeniedException(String message) {
-    super(Objects.requireNonNull(message, "message must not be null"));
+  /**
+   * The caller lacks the role the operation requires, with no transport status to attach as the
+   * cause.
+   */
+  public SagaPermissionDeniedException() {
+    super(SagaErrorCode.PERMISSION_DENIED, ErrorMetadata.of());
   }
 
-  public SagaPermissionDeniedException(String message, Throwable cause) {
+  /**
+   * The caller lacks the role the operation requires.
+   *
+   * @param cause the transport status that reported it
+   */
+  public SagaPermissionDeniedException(Throwable cause) {
     super(
-        Objects.requireNonNull(message, "message must not be null"),
+        SagaErrorCode.PERMISSION_DENIED,
+        ErrorMetadata.of(),
         Objects.requireNonNull(cause, "cause must not be null"));
   }
 }

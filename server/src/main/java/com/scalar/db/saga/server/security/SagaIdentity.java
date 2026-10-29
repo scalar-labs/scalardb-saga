@@ -44,12 +44,20 @@ public final class SagaIdentity {
     return new SagaIdentity(principal, roles);
   }
 
-  /** Returns the caller's stable principal identifier (for audit). */
+  /**
+   * Returns the caller's stable principal identifier (for audit).
+   *
+   * @return the principal, never blank
+   */
   public String principal() {
     return principal;
   }
 
-  /** Returns the immutable set of roles the caller holds. */
+  /**
+   * Returns the immutable set of roles the caller holds.
+   *
+   * @return the roles, possibly empty
+   */
   public Set<SagaRole> roles() {
     return roles;
   }
@@ -57,6 +65,9 @@ public final class SagaIdentity {
   /**
    * Returns whether this caller satisfies {@code required}, honoring the role hierarchy — {@code
    * true} if any held role {@linkplain SagaRole#implies implies} {@code required}.
+   *
+   * @param required the minimum role an operation requires
+   * @return {@code true} if a held role is {@code required} or ranks above it
    */
   public boolean hasRole(SagaRole required) {
     Objects.requireNonNull(required, "required must not be null");

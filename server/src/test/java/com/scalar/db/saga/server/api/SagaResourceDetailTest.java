@@ -5,11 +5,12 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.scalar.db.saga.api.SagaDetail;
-import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.api.TimelineEvent;
+import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.server.SagaWaiterRegistry;
 import com.scalar.db.saga.server.security.SagaAuthRequest;
 import com.scalar.db.saga.server.security.SagaAuthenticationException;
 import com.scalar.db.saga.server.security.SagaIdentity;
@@ -43,16 +44,26 @@ class SagaResourceDetailTest {
 
   private final HttpClient http = HttpClient.newHttpClient();
   private Javalin app;
-  private SagaOrchestrator orchestrator;
+  private DefaultSagaOrchestrator orchestrator;
 
   @BeforeEach
   void setUp() {
-    orchestrator = mock(SagaOrchestrator.class);
-    app = Javalin.create();
-    SagaSecurityHandler.register(app, new RoleHeaderProvider());
-    ErrorMapper.register(app);
-    SagaResource.register(app, orchestrator, 0L);
-    app.start(0);
+    orchestrator = mock(DefaultSagaOrchestrator.class);
+    app =
+        Javalin.create(
+            cfg -> {
+              SagaSecurityHandler.register(cfg.routes, new RoleHeaderProvider());
+              ErrorMapper.register(cfg.routes);
+              SagaResource.register(
+                  cfg.routes,
+                  orchestrator,
+                  0L,
+                  new java.util.concurrent.CompletableFuture<>(),
+                  new SagaWaiterRegistry());
+            });
+    // Loopback, not the wildcard: a wildcard bind can share a port with another suite's
+    // loopback server, which then takes the connection and answers this test's requests.
+    app.start("127.0.0.1", 0);
   }
 
   @AfterEach
@@ -66,7 +77,7 @@ class SagaResourceDetailTest {
   void detail_readRoleGiven_returns200WithTimeline() throws Exception {
     // Arrange
     SagaStateSnapshot snapshot =
-        new SagaStateSnapshot(SAGA_ID, "order-saga", SagaStatus.COMPENSATED, "owner", "v1", TS, TS);
+        new SagaStateSnapshot(SAGA_ID, "order-saga", SagaStatus.COMPENSATED, "v1", TS, TS);
     TimelineEvent event =
         new TimelineEvent(TS, "STEP_FAILED", 1, "credit", null, "downstream broke", null);
     when(orchestrator.getSagaDetail(SAGA_ID)).thenReturn(new SagaDetail(snapshot, List.of(event)));
@@ -78,6 +89,25 @@ class SagaResourceDetailTest {
     assertThat(response.statusCode()).isEqualTo(200);
     assertThat(response.body()).contains("\"sagaId\":\"s1\"");
     assertThat(response.body()).contains("downstream broke");
+    assertThat(response.body()).contains("\"truncated\":false");
+  }
+
+  @Test
+  void detail_truncatedTimeline_surfacesFlagInResponse() throws Exception {
+    // Arrange — the orchestrator cut the timeline to its configured bound
+    SagaStateSnapshot snapshot =
+        new SagaStateSnapshot(SAGA_ID, "order-saga", SagaStatus.ESCALATED, "v1", TS, TS);
+    TimelineEvent event =
+        new TimelineEvent(TS, "SAGA_ESCALATED", null, null, SagaStatus.ESCALATED, "stuck", null);
+    when(orchestrator.getSagaDetail(SAGA_ID))
+        .thenReturn(new SagaDetail(snapshot, List.of(event), true));
+
+    // Act
+    HttpResponse<String> response = send("GET", "/sagas/s1/detail", "read");
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(200);
+    assertThat(response.body()).contains("\"truncated\":true");
   }
 
   @Test
@@ -96,7 +126,7 @@ class SagaResourceDetailTest {
   private HttpResponse<String> send(String method, String path, @Nullable String role)
       throws Exception {
     HttpRequest.Builder builder =
-        HttpRequest.newBuilder(URI.create("http://localhost:" + app.port() + path))
+        HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + app.port() + path))
             .method(method, HttpRequest.BodyPublishers.noBody());
     if (role != null) {
       builder.header("X-Test-Role", role);

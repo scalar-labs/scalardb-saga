@@ -1,0 +1,58 @@
+{
+  "name": "order-tcc-confirm-retry",
+  "mode": "TCC",
+  "defaultRetryPolicy": { "maxAttempts": 5, "initialIntervalMillis": 200, "backoffMultiplier": 2.0, "maxIntervalMillis": 2000 },
+  "steps": [
+    {
+      "name": "payment",
+      "service": "payment",
+      "reservation": {
+        "method": "POST", "path": "/tcc/payment/reserve",
+        "jsonBody": { "orderId": "${orderId}", "amount": "${amount}" },
+        "output": { "paymentId": "$.payment_id" }
+      },
+      "confirmation": {
+        "method": "POST", "path": "/tcc/payment/confirm",
+        "jsonBody": { "paymentId": "${paymentId}" }
+      },
+      "cancellation": {
+        "method": "POST", "path": "/tcc/payment/cancel",
+        "jsonBody": { "orderId": "${orderId}" }
+      }
+    },
+    {
+      "name": "inventory",
+      "service": "inventory",
+      "reservation": {
+        "method": "POST", "path": "/tcc/inventory/reserve",
+        "jsonBody": { "orderId": "${orderId}", "item": "${item}", "quantity": "${quantity}" },
+        "output": { "reservationId": "$.inventory_id" }
+      },
+      "confirmation": {
+        "method": "POST", "path": "/tcc/inventory/confirm",
+        "jsonBody": { "reservationId": "${reservationId}" }
+      },
+      "cancellation": {
+        "method": "POST", "path": "/tcc/inventory/cancel",
+        "jsonBody": { "orderId": "${orderId}" }
+      }
+    },
+    {
+      "name": "shipping",
+      "service": "shipping",
+      "reservation": {
+        "method": "POST", "path": "/tcc/shipping/reserve",
+        "jsonBody": { "orderId": "${orderId}", "paymentId": "${paymentId}", "reservationId": "${reservationId}" },
+        "output": { "shipmentId": "$.shipping_id" }
+      },
+      "confirmation": {
+        "method": "POST", "path": "/tcc/shipping/confirm-flaky",
+        "jsonBody": { "shipmentId": "${shipmentId}" }
+      },
+      "cancellation": {
+        "method": "POST", "path": "/tcc/shipping/cancel",
+        "jsonBody": { "orderId": "${orderId}" }
+      }
+    }
+  ]
+}

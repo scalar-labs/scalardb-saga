@@ -12,7 +12,11 @@ import java.util.Optional;
  */
 public interface SagaContext {
 
-  /** Returns the unique identifier of this saga instance. */
+  /**
+   * Returns the unique identifier of this saga instance.
+   *
+   * @return the saga instance id
+   */
   String getSagaId();
 
   /**

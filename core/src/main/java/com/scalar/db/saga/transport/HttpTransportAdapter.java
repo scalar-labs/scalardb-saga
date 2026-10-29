@@ -15,10 +15,10 @@ import org.jspecify.annotations.Nullable;
  * HttpCall}'s {@code ${key}} path/query/jsonBody/stringBody templates against the saga context and
  * performs the call through the shared {@link HttpExchange} (correlation headers, status→retryable
  * classification, SSRF allowlist + body limits, endpoint default headers). The request body is
- * either the flat {@code jsonBody} map serialized as JSON or the raw templated {@code stringBody}
- * string (sent with the call's {@code contentType}, defaulting to {@code application/json}). The
- * response is reduced to the call's {@code output} mapping ({@code $.path} JSON navigation and the
- * {@code $body} raw-body token).
+ * either the {@code jsonBody} map serialized as a JSON object or the raw templated {@code
+ * stringBody} string (sent with the call's {@code contentType}, defaulting to {@code
+ * application/json}). The response is reduced to the call's {@code output} mapping ({@code $.path}
+ * JSON navigation and the {@code $body} raw-body token).
  */
 final class HttpTransportAdapter implements TransportAdapter {
 
@@ -71,9 +71,9 @@ final class HttpTransportAdapter implements TransportAdapter {
             DeclarativeExpressions.resolveString(http.getStringBody(), context)
                 .getBytes(HttpHeaders.charsetOf(contentType));
       } else {
-        // Flat-map body serialized as JSON; the content type defaults to application/json but a
+        // Map body serialized as a JSON object; the content type defaults to application/json but a
         // declared override (e.g. a JSON variant content type) takes precedence.
-        Map<String, Object> requestBody =
+        Map<String, @Nullable Object> requestBody =
             DeclarativeExpressions.resolveObjectMap(http.getJsonBody(), context);
         try {
           body = exchange.encodeJson(requestBody);
@@ -85,15 +85,20 @@ final class HttpTransportAdapter implements TransportAdapter {
       }
     }
 
-    // For an async step, hand the participant a callback URL so it can complete the step later. The
-    // header is omitted when the provider is null (embedded mode / async completion not
-    // configured — such a step is rejected at registration, so a null provider here means a
-    // non-async step) or when the provider returns null for this step.
+    // For an async step, hand the participant a callback URL so it can complete the step later, and
+    // a failure URL so it can report that the step failed. Both are omitted when the provider is
+    // null (embedded mode or async completion not configured; such a step is rejected at
+    // registration, so a null provider here means a non-async step) or returns null for this step.
+    // The failure URL alone is omitted when the provider has no failure route.
     List<Map.Entry<String, String>> headers = new ArrayList<>();
     if (http.isAsync() && callbackUrlProvider != null) {
       String callbackUrl = callbackUrlProvider.callbackUrl(context.getSagaId(), stepName);
       if (callbackUrl != null) {
         headers.add(Map.entry(HttpHeaders.SAGA_CALLBACK_URL, callbackUrl));
+        String failureUrl = callbackUrlProvider.failureUrl(context.getSagaId(), stepName);
+        if (failureUrl != null) {
+          headers.add(Map.entry(HttpHeaders.SAGA_FAILURE_URL, failureUrl));
+        }
       }
     }
 

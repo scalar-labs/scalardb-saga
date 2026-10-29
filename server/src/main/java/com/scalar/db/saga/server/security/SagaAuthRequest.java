@@ -77,12 +77,21 @@ public final class SagaAuthRequest {
         operation, remoteAddress, name -> normalized.get(name.toLowerCase(Locale.ROOT)));
   }
 
-  /** Returns the operation label being authorized (for audit/logging). */
+  /**
+   * Returns the operation label being authorized (for audit/logging).
+   *
+   * @return the label the transport supplied, such as an HTTP {@code "POST /sagas"} or a gRPC
+   *     method name
+   */
   public String operation() {
     return operation;
   }
 
-  /** Returns the caller's source address, if the transport exposed one. */
+  /**
+   * Returns the caller's source address, if the transport exposed one.
+   *
+   * @return the source address, or empty if the transport did not expose one
+   */
   public Optional<String> remoteAddress() {
     return Optional.ofNullable(remoteAddress);
   }
@@ -90,6 +99,9 @@ public final class SagaAuthRequest {
   /**
    * Returns the value of the named request header (case-insensitive), or empty if absent. A
    * provider reads the header carrying its credential — e.g. {@code header("Authorization")}.
+   *
+   * @param name the header name, matched case-insensitively
+   * @return the header's value, or empty if the request carries no such header
    */
   public Optional<String> header(String name) {
     Objects.requireNonNull(name, "name must not be null");

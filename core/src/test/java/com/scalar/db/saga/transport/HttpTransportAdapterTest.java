@@ -3,6 +3,7 @@ package com.scalar.db.saga.transport;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.scalar.db.saga.api.HttpMethod;
 import com.scalar.db.saga.api.SagaContext;
 import com.scalar.db.saga.api.StepResult;
@@ -10,9 +11,13 @@ import com.scalar.db.saga.definition.HttpCall;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.math.BigDecimal;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -33,6 +38,7 @@ class HttpTransportAdapterTest {
   private final AtomicReference<String> requestBody = new AtomicReference<>();
   private final AtomicReference<byte[]> requestBodyBytes = new AtomicReference<>();
   private final AtomicReference<String> callbackUrlHeader = new AtomicReference<>();
+  private final AtomicReference<String> failureUrlHeader = new AtomicReference<>();
   private final AtomicInteger hitCount = new AtomicInteger();
 
   @BeforeEach
@@ -47,6 +53,7 @@ class HttpTransportAdapterTest {
           requestMethod.set(ex.getRequestMethod());
           respond(ex, 200, "{\"debit_id\":\"DBT-1\"}");
         });
+    server.createContext("/quote", ex -> respond(ex, 200, "{\"price\":0.10}"));
     server.createContext(
         "/empty-debit",
         ex -> respond(ex, 200, "{}")); // success but missing the expected output field
@@ -76,6 +83,7 @@ class HttpTransportAdapterTest {
         "/async",
         ex -> {
           callbackUrlHeader.set(ex.getRequestHeaders().getFirst(HttpHeaders.SAGA_CALLBACK_URL));
+          failureUrlHeader.set(ex.getRequestHeaders().getFirst(HttpHeaders.SAGA_FAILURE_URL));
           respond(ex, 202, "{}"); // 202 Accepted — the participant will call back later
         });
     server.createContext("/fail503", ex -> respond(ex, 503, "{}"));
@@ -130,6 +138,43 @@ class HttpTransportAdapterTest {
         .call(spec, ctx(Map.of()), "debit");
 
     assertThat(callbackUrlHeader.get()).isEqualTo("http://cb/saga-1/debit");
+  }
+
+  @Test
+  void call_asyncStep_injectsFailureUrlHeader() throws Exception {
+    // Arrange
+    HttpCall spec = HttpCall.newBuilder("/async").method(HttpMethod.POST).async(true).build();
+    CallbackUrlProvider provider =
+        new CallbackUrlProvider() {
+          @Override
+          public String callbackUrl(String sagaId, String stepName) {
+            return "http://cb/" + sagaId + "/" + stepName + "/complete";
+          }
+
+          @Override
+          public String failureUrl(String sagaId, String stepName) {
+            return "http://cb/" + sagaId + "/" + stepName + "/fail";
+          }
+        };
+
+    // Act
+    adapterWithProvider(provider).call(spec, ctx(Map.of()), "debit");
+
+    // Assert
+    assertThat(failureUrlHeader.get()).isEqualTo("http://cb/saga-1/debit/fail");
+  }
+
+  @Test
+  void call_asyncStepWithNoFailureRoute_omitsFailureUrlHeader() throws Exception {
+    // Arrange — a provider that only implements the callback URL.
+    HttpCall spec = HttpCall.newBuilder("/async").method(HttpMethod.POST).async(true).build();
+
+    // Act
+    adapterWithProvider((sagaId, step) -> "http://cb/x").call(spec, ctx(Map.of()), "debit");
+
+    // Assert
+    assertThat(callbackUrlHeader.get()).isEqualTo("http://cb/x");
+    assertThat(failureUrlHeader.get()).isNull();
   }
 
   @Test
@@ -207,6 +252,60 @@ class HttpTransportAdapterTest {
     assertThat(sagaIdHeader.get()).isEqualTo("saga-1");
     assertThat(sagaStepHeader.get()).isEqualTo("debit");
     assertThat(requestMethod.get()).isEqualTo("POST");
+  }
+
+  @Test
+  void call_jsonBodyWithLiteralsAndNesting_sendsValuesAsDeclared() throws Exception {
+    // Arrange — literal numbers, booleans and null keep their JSON type, and strings are resolved
+    // at any depth.
+    Map<String, Object> item = new HashMap<>();
+    item.put("sku", "${sku}");
+    item.put("note", null);
+    HttpCall spec =
+        HttpCall.newBuilder("/notify")
+            .jsonBody(
+                Map.of(
+                    "quantity",
+                    2,
+                    "price",
+                    9.5,
+                    "gift",
+                    true,
+                    "amount",
+                    "${amount}",
+                    "items",
+                    List.of(item),
+                    "tags",
+                    Arrays.asList("a", "${tag}")))
+            .build();
+
+    // Act
+    adapter.call(spec, ctx(Map.of("sku", "S-1", "amount", 500, "tag", "b")), "notify");
+
+    // Assert
+    ObjectMapper mapper = new ObjectMapper();
+    assertThat(mapper.readTree(requestBody.get()))
+        .isEqualTo(
+            mapper.readTree(
+                """
+                {"quantity": 2, "price": 9.5, "gift": true, "amount": 500,
+                 "items": [{"sku": "S-1", "note": null}], "tags": ["a", "b"]}"""));
+  }
+
+  @Test
+  void call_outputCapturingDecimal_keepsItExactly() throws Exception {
+    // Arrange
+    HttpCall spec =
+        HttpCall.newBuilder("/quote")
+            .method(HttpMethod.GET)
+            .output(Map.of("price", "$.price"))
+            .build();
+
+    // Act
+    Map<String, Object> output = adapter.call(spec, ctx(Map.of()), "quote").getOutput();
+
+    // Assert — not the double 0.1.
+    assertThat(output).containsEntry("price", new BigDecimal("0.10"));
   }
 
   @Test

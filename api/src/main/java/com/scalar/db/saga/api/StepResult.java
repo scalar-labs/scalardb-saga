@@ -34,14 +34,25 @@ public final class StepResult {
     this.output = output;
   }
 
-  /** Creates a result with a single key-value pair. */
+  /**
+   * Creates a result with a single key-value pair.
+   *
+   * @param key the output key
+   * @param value the output value
+   * @return a result holding that one entry
+   */
   public static StepResult of(String key, Object value) {
     Objects.requireNonNull(key, "key must not be null");
     Objects.requireNonNull(value, "value must not be null");
     return new StepResult(false, Collections.singletonMap(key, value));
   }
 
-  /** Creates a result with multiple key-value pairs. The map is defensively copied. */
+  /**
+   * Creates a result with multiple key-value pairs. The map is defensively copied.
+   *
+   * @param output the output entries; neither a key nor a value may be null
+   * @return a result holding those entries, or {@link #empty()} if the map is empty
+   */
   public static StepResult of(Map<String, Object> output) {
     Objects.requireNonNull(output, "output must not be null");
     if (output.isEmpty()) {
@@ -56,7 +67,11 @@ public final class StepResult {
     return new StepResult(false, Collections.unmodifiableMap(copy));
   }
 
-  /** Creates a result with no output data. */
+  /**
+   * Creates a result with no output data.
+   *
+   * @return the empty result
+   */
   public static StepResult empty() {
     return EMPTY;
   }
@@ -64,17 +79,27 @@ public final class StepResult {
   /**
    * Creates a pending result (daemon mode only). The engine parks the saga until an external
    * callback completes the step via {@code completeStep} (daemon mode).
+   *
+   * @return the pending result
    */
   public static StepResult pending() {
     return PENDING;
   }
 
-  /** Returns {@code true} if this is a pending result (daemon mode async step). */
+  /**
+   * Returns {@code true} if this is a pending result (daemon mode async step).
+   *
+   * @return whether the step is still waiting on an external completion
+   */
   public boolean isPending() {
     return pending;
   }
 
-  /** Returns the output data map. The returned map is unmodifiable. */
+  /**
+   * Returns the output data map. The returned map is unmodifiable.
+   *
+   * @return the output entries; empty for {@link #empty()} and {@link #pending()}
+   */
   @SuppressFBWarnings(
       value = "EI_EXPOSE_REP",
       justification =

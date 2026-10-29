@@ -12,7 +12,15 @@
 #
 # A JRE, not a JDK: the daemon runs a start script and needs no compiler, so shipping javac would add
 # tooling that is useful to an attacker inside the container and to nobody else.
-FROM eclipse-temurin:21-jre-noble@sha256:373787d1d45a87f084fda43e7de0e9acf5eedee049446efac738f13587ec4c64
+#
+# An LTS major, and 25 specifically: the engine drives sagas on virtual threads, and JEP 491 (JDK 24)
+# is what stops a virtual thread pinning its carrier while it blocks on a monitor; while it pins,
+# effective database concurrency is capped at the number of carriers. Interim releases stop receiving
+# patches the moment the next one ships, so only LTS majors are candidates.
+#
+# Ubuntu resolute (26.04) underneath because it is the current Ubuntu LTS. Like the JRE major, moving
+# to the next one is a deliberate manual change.
+FROM eclipse-temurin:25.0.4.1_1-jre-resolute@sha256:acd83cdf6c9b5bfcd7c4e9d3e1969bacaacdcfa034c074500ab28610fb840f81
 
 # Two things in one layer, since each `RUN` is a layer and neither is worth its own:
 #
@@ -20,17 +28,29 @@ FROM eclipse-temurin:21-jre-noble@sha256:373787d1d45a87f084fda43e7de0e9acf5eedee
 #    carry packages whose CVEs are already fixed upstream; upgrading at build time closes that window
 #    without waiting for a base image respin. hadolint flags apt-get upgrade (DL3005) as making builds
 #    non-deterministic — which is the intent, and the digest pin above fixes the starting point.
+#    DEBIAN_FRONTEND=noninteractive makes any package whose configuration asks a question take its
+#    default instead of waiting on a prompt no build has a TTY to answer. It is exported inside the
+#    RUN rather than set with ENV so it stays out of the runtime image.
 # 2. Create a fixed numeric uid/gid, matching the convention the other Scalar server images use, so a
 #    Kubernetes runAsNonRoot admission check passes without a passwd lookup and any mounted volume's
-#    ownership stays predictable across upgrades.
+#    ownership stays predictable across upgrades. The account gets nologin as its shell: nothing ever
+#    logs in as the daemon user, so a real shell would serve only an attacker who reaches it.
 #
 # hadolint ignore=DL3005
-RUN apt-get update \
+RUN export DEBIAN_FRONTEND=noninteractive \
+ && apt-get update \
  && apt-get upgrade -y --no-install-recommends \
  && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --system --gid 201 scalardb \
- && useradd --system --uid 201 --gid 201 --no-create-home scalardb
+ && useradd --system --uid 201 --gid 201 --no-create-home --shell /usr/sbin/nologin scalardb
+
+# Temporary fix for https://emudhra.we-have-a-problem.com/
+# We can remove this RUN after we update to the fixed version of Java.
+RUN keytool -delete -cacerts -storepass changeit -alias "cn_emsign_ecc_root_ca__g3,o_emudhra_technologies_limited,ou_emsign_pki,c_in [jdk]" \
+ && keytool -delete -cacerts -storepass changeit -alias "cn_emsign_root_ca__g1,o_emudhra_technologies_limited,ou_emsign_pki,c_in [jdk]" \
+ && keytool -delete -cacerts -storepass changeit -alias "cn_emsign_ecc_root_ca__c3,o_emudhra_inc,ou_emsign_pki,c_us [jdk]" \
+ && keytool -delete -cacerts -storepass changeit -alias "cn_emsign_root_ca__c1,o_emudhra_inc,ou_emsign_pki,c_us [jdk]"
 
 WORKDIR /scalardb-saga
 
@@ -59,17 +79,23 @@ COPY conf/ ./conf/
 # regardless of platform.
 COPY LICENSE THIRD-PARTY-NOTICES.txt /licenses/
 
+# Temporary fix for https://emudhra.we-have-a-problem.com/
+# Users can run `java CheckCerts` in the WORKDIR to confirm that the compromised CA certificates are
+# not trusted. We can remove this COPY after we update to the fixed version of Java.
+COPY CheckCerts.class CheckCerts.java ./
+
 USER 201:201
 
 # The SagaServerConfig defaults: 12080 REST, 12051 gRPC. Both transports are on by default and either
 # can be disabled in the configuration, in which case its port simply goes unbound.
 EXPOSE 12080 12051
 
-# No entrypoint wrapper script. Container-aware JVM flags (MaxRAMPercentage, ExitOnOutOfMemoryError)
-# are baked into the start script by Gradle's applicationDefaultJvmArgs, and JAVA_OPTS still
-# overrides them at run time — so the shell hop the other Scalar images use to assemble JAVA_OPTS
-# buys nothing here. The script ends in `exec java`, so the JVM becomes PID 1 and receives SIGTERM
-# directly; SagaServer's shutdown hook then drains in-flight sagas rather than dropping them.
+# No entrypoint wrapper script. The JVM flags (MaxRAMPercentage, ExitOnOutOfMemoryError,
+# enable-native-access) are baked into the start script by Gradle's applicationDefaultJvmArgs, and
+# JAVA_OPTS still overrides the two sizing flags at run time, so the shell hop the other Scalar
+# images use to assemble JAVA_OPTS buys nothing here. The script ends in `exec java`, so the JVM
+# becomes PID 1 and receives SIGTERM directly; SagaServer's shutdown hook then drains in-flight
+# sagas rather than dropping them.
 #
 # No grpc_health_probe binary either: Kubernetes has had native gRPC probes since 1.24 (GA in 1.27),
 # and the daemon serves both `GET /health` and the standard grpc.health.v1.Health service — the

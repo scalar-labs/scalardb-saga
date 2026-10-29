@@ -137,6 +137,120 @@ class DeclarativeExpressionsTest {
   }
 
   @Test
+  void resolvePath_dotDotValue_throwsNonRetryableKnownNotCommitted() {
+    // Act — encoding leaves '.' alone, so ".." would become a dot segment
+    Throwable thrown =
+        org.assertj.core.api.Assertions.catchThrowable(
+            () ->
+                DeclarativeExpressions.resolvePath(
+                    "/orders/${id}/cancel", ctx(Map.of("id", ".."))));
+
+    // Assert
+    assertThat(thrown).isInstanceOf(TransportException.class);
+    assertThat(((TransportException) thrown).isRetryable()).isFalse();
+    assertThat(((TransportException) thrown).knownNotCommitted()).isTrue();
+  }
+
+  @Test
+  void resolvePath_singleDotValue_throwsNonRetryable() {
+    // Act
+    Throwable thrown =
+        org.assertj.core.api.Assertions.catchThrowable(
+            () -> DeclarativeExpressions.resolvePath("/orders/${id}", ctx(Map.of("id", "."))));
+
+    // Assert
+    assertThat(thrown).isInstanceOf(TransportException.class);
+    assertThat(((TransportException) thrown).isRetryable()).isFalse();
+  }
+
+  @Test
+  void resolvePath_adjacentValuesFormingDotDot_throwsNonRetryable() {
+    // Act — two values that are each "." still make one ".." segment together
+    Throwable thrown =
+        org.assertj.core.api.Assertions.catchThrowable(
+            () ->
+                DeclarativeExpressions.resolvePath(
+                    "/orders/${a}${b}", ctx(Map.of("a", ".", "b", "."))));
+
+    // Assert
+    assertThat(thrown).isInstanceOf(TransportException.class);
+  }
+
+  @Test
+  void resolvePath_valueCompletingLiteralDot_throwsNonRetryable() {
+    // Act — a literal '.' plus a "." value is still a ".." segment
+    Throwable thrown =
+        org.assertj.core.api.Assertions.catchThrowable(
+            () -> DeclarativeExpressions.resolvePath("/orders/.${id}", ctx(Map.of("id", "."))));
+
+    // Assert
+    assertThat(thrown).isInstanceOf(TransportException.class);
+  }
+
+  @Test
+  void resolvePath_dotDotValueBeforeLiteralQuery_throwsNonRetryable() {
+    // Act — the template's own '?' ends the path, so the last segment is still ".."
+    Throwable thrown =
+        org.assertj.core.api.Assertions.catchThrowable(
+            () ->
+                DeclarativeExpressions.resolvePath(
+                    "/orders/${id}?force=true", ctx(Map.of("id", ".."))));
+
+    // Assert
+    assertThat(thrown).isInstanceOf(TransportException.class);
+  }
+
+  @Test
+  void resolvePath_dotDotValueBeforeLiteralFragment_throwsNonRetryable() {
+    // Act
+    Throwable thrown =
+        org.assertj.core.api.Assertions.catchThrowable(
+            () -> DeclarativeExpressions.resolvePath("/orders/${id}#top", ctx(Map.of("id", ".."))));
+
+    // Assert
+    assertThat(thrown).isInstanceOf(TransportException.class);
+  }
+
+  @Test
+  void resolvePath_dotDotValueInLiteralQuery_keepsValue() throws Exception {
+    // Act — after the template's '?', "/../" is query text, not a path segment
+    String path =
+        DeclarativeExpressions.resolvePath("/orders?filter=/${id}/x", ctx(Map.of("id", "..")));
+
+    // Assert
+    assertThat(path).isEqualTo("/orders?filter=/../x");
+  }
+
+  @Test
+  void resolvePath_valueWithDotsInsideSegment_keepsValue() throws Exception {
+    // Act — dots that do not make up a whole segment are ordinary characters
+    String path =
+        DeclarativeExpressions.resolvePath(
+            "/orders/${a}/${b}/x${c}", ctx(Map.of("a", "...", "b", "v1.2", "c", "..")));
+
+    // Assert
+    assertThat(path).isEqualTo("/orders/.../v1.2/x..");
+  }
+
+  @Test
+  void resolvePath_dotSegmentOnlyInTemplate_keepsIt() throws Exception {
+    // Act — a dot segment the definition author wrote is not a substitution's doing
+    String path = DeclarativeExpressions.resolvePath("/a/../b/${id}", ctx(Map.of("id", 7)));
+
+    // Assert
+    assertThat(path).isEqualTo("/a/../b/7");
+  }
+
+  @Test
+  void resolvePath_emptyValueAfterLiteralDot_keepsIt() throws Exception {
+    // Act — the substitution adds nothing, so the "." segment is the author's
+    String path = DeclarativeExpressions.resolvePath("/a/.${id}", ctx(Map.of("id", "")));
+
+    // Assert
+    assertThat(path).isEqualTo("/a/.");
+  }
+
+  @Test
   void resolvePath_missingKey_throwsNonRetryable() {
     // Act
     Throwable thrown =

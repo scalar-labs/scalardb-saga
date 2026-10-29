@@ -63,17 +63,27 @@ public final class SagaPage<T> {
    * up to a full group of equal-keyed rows, which is not itself bounded by {@code pageSize} — when
    * the underlying query completes such a group straddling the page boundary rather than splitting
    * it. See {@link SagaQuery.Builder#pageSize(int)}.
+   *
+   * @return the items, unmodifiable and possibly empty
    */
   public List<T> getItems() {
     return items;
   }
 
-  /** The token to fetch the next page, or {@code null} if this is the last page. */
+  /**
+   * The token to fetch the next page, or {@code null} if this is the last page.
+   *
+   * @return the next page token, or {@code null}
+   */
   public @Nullable String getNextPageToken() {
     return nextPageToken;
   }
 
-  /** Returns {@code true} if there is a next page to fetch. */
+  /**
+   * Returns {@code true} if there is a next page to fetch.
+   *
+   * @return whether {@link #getNextPageToken()} is non-null
+   */
   public boolean hasMore() {
     return nextPageToken != null;
   }

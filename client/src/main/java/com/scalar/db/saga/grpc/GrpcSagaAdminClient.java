@@ -1,7 +1,5 @@
 package com.scalar.db.saga.grpc;
 
-import com.google.protobuf.Any;
-import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.rpc.ErrorInfo;
 import com.scalar.db.saga.api.ResetResult;
 import com.scalar.db.saga.api.SagaAdminService;
@@ -9,22 +7,20 @@ import com.scalar.db.saga.api.SagaPage;
 import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.exception.ExceptionRegistry;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
-import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
-import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import com.scalar.db.saga.rpc.AdminServiceGrpc;
 import com.scalar.db.saga.rpc.AdminServiceGrpc.AdminServiceBlockingStub;
 import com.scalar.db.saga.rpc.InterventionRequest;
 import io.grpc.CallCredentials;
 import io.grpc.ManagedChannel;
-import io.grpc.Metadata;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
-import io.grpc.protobuf.StatusProto;
+import java.nio.file.Path;
 import java.util.Objects;
-import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import net.jcip.annotations.ThreadSafe;
@@ -70,11 +66,22 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
     this.defaultDeadlineMillis = defaultDeadlineMillis;
   }
 
-  /** Creates a client connected to {@code target} over plaintext (the in-cluster default). */
+  /**
+   * Creates a client connected to {@code target} over plaintext (the in-cluster default).
+   *
+   * @param target the saga server's gRPC target, typically {@code host:port}
+   * @return a client owning a channel to that server
+   */
   public static GrpcSagaAdminClient create(String target) {
     return newBuilder().target(target).build();
   }
 
+  /**
+   * Starts building a client, for when plaintext with no credential is not enough: TLS, a
+   * credential, or a default deadline.
+   *
+   * @return a new builder
+   */
   public static Builder newBuilder() {
     return new Builder();
   }
@@ -91,18 +98,7 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
    * @return call credentials that present {@code headerValue} under {@code headerName}
    */
   public static CallCredentials staticHeaderCredentials(String headerName, String headerValue) {
-    Objects.requireNonNull(headerName, "headerName must not be null");
-    Objects.requireNonNull(headerValue, "headerValue must not be null");
-    Metadata.Key<String> key = Metadata.Key.of(headerName, Metadata.ASCII_STRING_MARSHALLER);
-    return new CallCredentials() {
-      @Override
-      public void applyRequestMetadata(
-          RequestInfo requestInfo, Executor appExecutor, MetadataApplier applier) {
-        Metadata headers = new Metadata();
-        headers.put(key, headerValue);
-        applier.apply(headers);
-      }
-    };
+    return GrpcClientSupport.staticHeaderCredentials(headerName, headerValue);
   }
 
   // --------------------------------------------------------------------------
@@ -148,7 +144,7 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
     // ESCALATED sweep remote (matching SagaAdminService's contract).
     SagaStatus status = query.getStatus();
     if (status != null && status != SagaStatus.ESCALATED) {
-      throw new IllegalArgumentException(
+      throw new SagaIllegalArgumentException(
           "resetEscalated only sweeps ESCALATED sagas; conflicting status filter: " + status);
     }
     try {
@@ -209,87 +205,36 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
   // --------------------------------------------------------------------------
 
   /**
-   * Maps a single-saga mutation failure to its api exception. The daemon carries a machine-readable
-   * reason in an {@link ErrorInfo} detail: a {@code NOT_FOUND} whose reason is {@code
-   * SAGA_DEFINITION_NOT_FOUND} reconstructs {@link SagaDefinitionNotFoundException} (the saga's
-   * definition is unregistered — the caller must re-register it), otherwise it is a missing saga.
-   * The wrong-state {@code FAILED_PRECONDITION} and lost-CAS {@code ABORTED} carry {@code sagaId};
-   * everything else routes through {@link #mapCommon}.
+   * Maps a single-saga mutation failure to its api exception. When the daemon attached an {@link
+   * ErrorInfo}, {@link ExceptionRegistry} reconstructs the typed exception from its wire code +
+   * metadata (inverting what {@code GrpcErrorMapper} put on the wire). Statuses without an {@code
+   * ErrorInfo} fall through to transport-level dispatch: {@code NOT_FOUND} → {@code
+   * SagaNotFoundException} using the caller-supplied id; {@code ABORTED} → {@code
+   * SagaConcurrentModificationException}; everything else via {@link #mapCommon}.
    */
   private static RuntimeException mapMutation(StatusRuntimeException e, String sagaId) {
+    SagaRuntimeException reconstructed = GrpcClientSupport.reconstruct(e);
+    if (reconstructed != null) {
+      return reconstructed;
+    }
     Status.Code code = e.getStatus().getCode();
     if (code == Status.Code.NOT_FOUND) {
-      return notFoundException(sagaId, errorInfo(e));
-    }
-    if (code == Status.Code.FAILED_PRECONDITION) {
-      return preconditionException(sagaId, e);
+      return new SagaNotFoundException(sagaId);
     }
     if (code == Status.Code.ABORTED) {
       return new SagaConcurrentModificationException(sagaId, e);
     }
-    return mapCommon(e);
+    return GrpcClientSupport.mapTransport(e);
   }
 
   /**
-   * Distinguishes the two {@code NOT_FOUND} shapes by the {@link ErrorInfo} reason. Only {@code
-   * SAGA_DEFINITION_NOT_FOUND} (with a {@code sagaName}) reconstructs {@link
-   * SagaDefinitionNotFoundException}; a missing reason, name, or any other reason is a missing
-   * saga.
+   * The whole mapping for a call with no saga-scoped context to add: the server's {@code ErrorInfo}
+   * when it sent one, otherwise transport-status dispatch — the same two primitives {@link
+   * #mapMutation} composes with its own handling slotted between them.
    */
-  private static RuntimeException notFoundException(String sagaId, @Nullable ErrorInfo info) {
-    if (info != null && "SAGA_DEFINITION_NOT_FOUND".equals(info.getReason())) {
-      String sagaName = info.getMetadataMap().get("sagaName");
-      if (sagaName != null) {
-        String version = info.getMetadataMap().get("version");
-        return version == null
-            ? new SagaDefinitionNotFoundException(sagaName)
-            : new SagaDefinitionNotFoundException(sagaName, version);
-      }
-    }
-    return new SagaNotFoundException(sagaId);
-  }
-
-  /**
-   * Reconstructs the wrong-state exception. The daemon sends the machine-readable code name (e.g.
-   * {@code SAGA_WRONG_STATE}) as the {@link ErrorInfo} reason, so the client recovers the {@link
-   * SagaStatePreconditionException.Code} a caller switches on. An absent or unrecognized reason
-   * degrades to {@link SagaRuntimeException} rather than guessing a code.
-   */
-  private static RuntimeException preconditionException(String sagaId, StatusRuntimeException e) {
-    ErrorInfo info = errorInfo(e);
-    if (info == null) {
-      return mapCommon(e);
-    }
-    try {
-      SagaStatePreconditionException.Code code =
-          SagaStatePreconditionException.Code.valueOf(info.getReason());
-      return new SagaStatePreconditionException(
-          sagaId, code, "Saga '" + sagaId + "' is not in a state that allows this operation");
-    } catch (IllegalArgumentException unknownCode) {
-      return mapCommon(e);
-    }
-  }
-
-  /** The first {@link ErrorInfo} detail the daemon attached to {@code e}, or {@code null}. */
-  private static @Nullable ErrorInfo errorInfo(StatusRuntimeException e) {
-    com.google.rpc.Status status = StatusProto.fromThrowable(e);
-    if (status == null) {
-      return null;
-    }
-    for (Any detail : status.getDetailsList()) {
-      if (detail.is(ErrorInfo.class)) {
-        try {
-          return detail.unpack(ErrorInfo.class);
-        } catch (InvalidProtocolBufferException malformed) {
-          return null;
-        }
-      }
-    }
-    return null;
-  }
-
   private static RuntimeException mapCommon(StatusRuntimeException e) {
-    return GrpcClientSupport.mapCommon(e, "Admin");
+    SagaRuntimeException reconstructed = GrpcClientSupport.reconstruct(e);
+    return reconstructed != null ? reconstructed : GrpcClientSupport.mapTransport(e);
   }
 
   /** Builder for {@link GrpcSagaAdminClient}, mirroring the application client's builder. */
@@ -297,11 +242,19 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
 
     @Nullable private String target;
     private boolean useTls = false;
+    @Nullable private Path trustCaCertPath;
+    @Nullable private String overrideAuthority;
     private long defaultDeadlineMillis = 0L;
     @Nullable private CallCredentials callCredentials;
 
     private Builder() {}
 
+    /**
+     * The saga server to connect to, as a gRPC target, typically {@code host:port}. Required.
+     *
+     * @param target the gRPC target
+     * @return this builder
+     */
     public Builder target(String target) {
       this.target = Objects.requireNonNull(target, "target must not be null");
       return this;
@@ -311,6 +264,9 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
      * The credential presented on every call, resolved server-side to the operator identity.
      * Against a daemon with a real provider this is required; {@link
      * #staticHeaderCredentials(String, String)} builds one for the header-based built-in providers.
+     *
+     * @param callCredentials the credential to present on every call
+     * @return this builder
      */
     public Builder callCredentials(CallCredentials callCredentials) {
       this.callCredentials =
@@ -318,22 +274,68 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
       return this;
     }
 
-    /** Plaintext transport (the default; appropriate for an isolated in-cluster network). */
+    /**
+     * Plaintext transport (the default; appropriate for an isolated in-cluster network).
+     *
+     * @return this builder
+     */
     public Builder usePlaintext() {
       this.useTls = false;
       return this;
     }
 
     /**
-     * Enables TLS. {@link #build()} fails fast if the JRE lacks ALPN (on Java 8, use 8u252+ or add
-     * {@code netty-tcnative-boringssl-static}).
+     * Enables TLS — against the daemon's native TLS ({@code scalar.db.saga.server.tls.enabled}) or
+     * a TLS-terminating mesh/proxy in front of it. The server certificate is validated against the
+     * JVM's default trust store unless {@link #trustCaCertificate(Path)} narrows it. {@link
+     * #build()} fails fast if neither the JRE nor a loaded tcnative provides ALPN (on Java 8, use
+     * 8u252+; the default grpc-netty-shaded transport bundles tcnative).
+     *
+     * @return this builder
      */
     public Builder useTransportSecurity() {
       this.useTls = true;
       return this;
     }
 
-    /** A default per-call deadline (ms) applied to every admin call; {@code 0} disables. */
+    /**
+     * Trusts only the CA certificate (PEM; concatenated certificates allowed) at {@code caCertPath}
+     * for this channel, replacing the JVM's default trust store. For servers whose certificate a
+     * public CA did not issue — a cert-manager or Vault private CA — where default trust rejects
+     * the handshake. Requires TLS: {@link #build()} fails if the channel is left plaintext, rather
+     * than silently ignoring a setting that says the caller expected encryption. The file is read
+     * at {@link #build()}, so a bad path fails there naming the file, not at the first RPC as an
+     * opaque {@code UNAVAILABLE}.
+     *
+     * @param caCertPath path to the PEM CA certificate to trust
+     * @return this builder
+     */
+    public Builder trustCaCertificate(Path caCertPath) {
+      this.trustCaCertPath = Objects.requireNonNull(caCertPath, "caCertPath must not be null");
+      return this;
+    }
+
+    /**
+     * Validates the server certificate against {@code authority} instead of the dialed address —
+     * for dialing by IP or through a port-forward while the certificate names the service's DNS
+     * name. Independent of {@link #trustCaCertificate(Path)}, and legitimate without TLS too (gRPC
+     * also routes on the authority).
+     *
+     * @param authority the name to validate the server certificate against
+     * @return this builder
+     */
+    public Builder overrideAuthority(String authority) {
+      this.overrideAuthority = Objects.requireNonNull(authority, "authority must not be null");
+      return this;
+    }
+
+    /**
+     * A default per-call deadline (ms) applied to every admin call; {@code 0} disables.
+     *
+     * @param defaultDeadlineMillis the deadline in milliseconds, or {@code 0} for none
+     * @return this builder
+     * @throws IllegalArgumentException if negative
+     */
     public Builder defaultDeadlineMillis(long defaultDeadlineMillis) {
       if (defaultDeadlineMillis < 0L) {
         throw new IllegalArgumentException("defaultDeadlineMillis must not be negative");
@@ -342,9 +344,21 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
       return this;
     }
 
+    /**
+     * Opens the channel and creates the client. A configuration that cannot work fails here rather
+     * than at the first call: a trusted CA on a plaintext channel, TLS without ALPN, or a CA
+     * certificate file that cannot be read.
+     *
+     * @return the client, which owns the channel until {@link GrpcSagaAdminClient#close()}
+     * @throws NullPointerException if {@link #target(String)} was not set
+     * @throws IllegalStateException if {@link #trustCaCertificate(Path)} was set without {@link
+     *     #useTransportSecurity()}, or TLS was requested but ALPN is unavailable
+     * @throws IllegalArgumentException if the CA certificate file cannot be read
+     */
     public GrpcSagaAdminClient build() {
       String resolvedTarget = Objects.requireNonNull(target, "target must be set");
-      ManagedChannel channel = GrpcClientSupport.openChannel(resolvedTarget, useTls);
+      ManagedChannel channel =
+          GrpcClientSupport.openChannel(resolvedTarget, useTls, trustCaCertPath, overrideAuthority);
       AdminServiceBlockingStub stub = AdminServiceGrpc.newBlockingStub(channel);
       if (callCredentials != null) {
         stub = stub.withCallCredentials(callCredentials);

@@ -13,6 +13,8 @@ final class HttpHeaders {
   // The callback URL a participant POSTs to when an async step completes (injected for async
   // steps).
   static final String SAGA_CALLBACK_URL = "X-Saga-Callback-Url";
+  // The URL a participant POSTs to when an async step fails (injected alongside the callback URL).
+  static final String SAGA_FAILURE_URL = "X-Saga-Failure-Url";
   static final String CONTENT_TYPE = "Content-Type";
   static final String CONTENT_LENGTH = "Content-Length";
   static final String APPLICATION_JSON = "application/json";

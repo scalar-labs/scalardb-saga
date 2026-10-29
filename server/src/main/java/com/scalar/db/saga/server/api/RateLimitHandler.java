@@ -3,8 +3,8 @@ package com.scalar.db.saga.server.api;
 import com.scalar.db.saga.server.security.SagaIdentity;
 import com.scalar.db.saga.server.security.SagaOperation;
 import com.scalar.db.saga.server.security.SagaSecurityHandler;
-import io.javalin.Javalin;
 import io.javalin.http.Context;
+import io.javalin.router.JavalinDefaultRoutingApi;
 import java.util.Objects;
 
 /**
@@ -38,15 +38,15 @@ public final class RateLimitHandler {
   /**
    * Registers the rate-limit handler.
    *
-   * @param app the Javalin app
+   * @param routes the routing configuration the server is created with
    * @param limiter the per-principal limiter; shared with the gRPC transport so a caller's budget
    *     spans both, rather than being counted separately per port
    */
-  public static void register(Javalin app, RateLimiter limiter) {
-    Objects.requireNonNull(app, "app must not be null");
+  public static void register(JavalinDefaultRoutingApi routes, RateLimiter limiter) {
+    Objects.requireNonNull(routes, "routes must not be null");
     Objects.requireNonNull(limiter, "limiter must not be null");
     RateLimitHandler handler = new RateLimitHandler(limiter);
-    app.beforeMatched(handler::handle);
+    routes.beforeMatched(handler::handle);
   }
 
   private void handle(Context ctx) {
@@ -60,9 +60,11 @@ public final class RateLimitHandler {
       // proceeds rather than being blocked by a limit it cannot attribute.
       return;
     }
-    if (!limiter.tryAcquire(identity.principal(), System.currentTimeMillis())) {
+    long now = System.currentTimeMillis();
+    if (!limiter.tryAcquire(identity.principal(), now)) {
       throw new RateLimitExceededException(
-          "Saga-start rate limit exceeded for principal '" + identity.principal() + "'");
+          "Saga-start rate limit exceeded for principal '" + identity.principal() + "'",
+          limiter.retryAfterMillis(identity.principal(), now));
     }
   }
 }

@@ -51,20 +51,44 @@ public final class ResetResult {
     private final SkipReason reason;
     @Nullable private final String detail;
 
+    /**
+     * Records a skip whose reason needs no further detail.
+     *
+     * @param sagaId the id of the saga that was not reset
+     * @param reason why it was skipped
+     */
     public SkippedSaga(String sagaId, SkipReason reason) {
       this(sagaId, reason, null);
     }
 
+    /**
+     * Records a skip with an optional description of the specific failure.
+     *
+     * @param sagaId the id of the saga that was not reset
+     * @param reason why it was skipped
+     * @param detail a human-readable description of the specific failure, or {@code null} when the
+     *     reason is self-explanatory
+     */
     public SkippedSaga(String sagaId, SkipReason reason, @Nullable String detail) {
       this.sagaId = Objects.requireNonNull(sagaId, "sagaId must not be null");
       this.reason = Objects.requireNonNull(reason, "reason must not be null");
       this.detail = detail;
     }
 
+    /**
+     * The id of the saga that was not reset.
+     *
+     * @return the saga id
+     */
     public String getSagaId() {
       return sagaId;
     }
 
+    /**
+     * Why the saga was skipped.
+     *
+     * @return the skip reason
+     */
     public SkipReason getReason() {
       return reason;
     }
@@ -73,6 +97,8 @@ public final class ResetResult {
      * A human-readable description of the specific failure, when the {@link #getReason() reason}
      * alone does not pin it down — e.g. which event type could not be decoded. {@code null} when
      * the reason is self-explanatory.
+     *
+     * @return the detail text, or {@code null}
      */
     @Nullable public String getDetail() {
       return detail;
@@ -103,6 +129,14 @@ public final class ResetResult {
   private final List<SkippedSaga> skipped;
   private final @Nullable String nextPageToken;
 
+  /**
+   * Creates the outcome of one page of a reset sweep.
+   *
+   * @param resetCount the number of sagas un-escalated in this page, zero or more
+   * @param skipped the matched sagas that were not reset (defensively copied)
+   * @param nextPageToken the token to continue the sweep, or {@code null} if this was the last page
+   * @throws IllegalArgumentException if {@code resetCount} is negative
+   */
   public ResetResult(int resetCount, List<SkippedSaga> skipped, @Nullable String nextPageToken) {
     if (resetCount < 0) {
       throw new IllegalArgumentException("resetCount must be >= 0, got " + resetCount);
@@ -113,7 +147,11 @@ public final class ResetResult {
     this.nextPageToken = nextPageToken;
   }
 
-  /** The number of sagas un-escalated and handed to the recovery loop in this page. */
+  /**
+   * The number of sagas un-escalated and handed to the recovery loop in this page.
+   *
+   * @return the reset count, zero or more
+   */
   public int getResetCount() {
     return resetCount;
   }
@@ -121,22 +159,36 @@ public final class ResetResult {
   /**
    * The matched sagas that were skipped, each with its {@link SkipReason}, unmodifiable. A skip is
    * always per-saga; a failure of the store itself aborts the sweep instead.
+   *
+   * @return the skipped sagas, unmodifiable and possibly empty
    */
   public List<SkippedSaga> getSkipped() {
     return skipped;
   }
 
-  /** Convenience for {@code getSkipped().size()}. */
+  /**
+   * Convenience for {@code getSkipped().size()}.
+   *
+   * @return the number of skipped sagas in this page
+   */
   public int getSkippedCount() {
     return skipped.size();
   }
 
-  /** The token to continue the sweep, or {@code null} if this was the last page. */
+  /**
+   * The token to continue the sweep, or {@code null} if this was the last page.
+   *
+   * @return the next page token, or {@code null}
+   */
   public @Nullable String getNextPageToken() {
     return nextPageToken;
   }
 
-  /** Returns {@code true} if there are more pages of escalated sagas to sweep. */
+  /**
+   * Returns {@code true} if there are more pages of escalated sagas to sweep.
+   *
+   * @return whether {@link #getNextPageToken()} is non-null
+   */
   public boolean hasMore() {
     return nextPageToken != null;
   }

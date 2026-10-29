@@ -42,6 +42,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.kind.outputs.prerelease }}
       latest: ${{ steps.kind.outputs.latest }}
+      notes: ${{ steps.notes.outputs.notes }}
     steps:
       # A dispatch can be pointed at any ref. On a branch, GITHUB_REF is refs/heads/<name>, the tag
       # comparison below strips nothing, and the job fails claiming a tag named "refs/heads/1.0" does
@@ -67,7 +68,7 @@ jobs:
       # nothing here would notice if a later version stopped making it. A tag moved mid-run now
       # releases whichever commit each run was triggered for instead of failing this job, which is
       # how the other three already behave.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -134,6 +135,64 @@ jobs:
               "${VERSION}. Update the default so the walkthrough pulls an image that exists."
             exit 1
           fi
+
+      - uses: ./.github/actions/setup-changie
+
+      # The release notes are the version's changie file, written by `changie batch` before the tag
+      # (see "Changelog" in RELEASING.md). Read here, before publish-maven, because a release without
+      # them is a mistake to stop while nothing is out yet: by the time github-release runs, the
+      # Central deployment and the image have already gone. A pre-release previews what its release
+      # will collect, so it takes the version file if the batch already ran and the pending entries
+      # otherwise, and never fails for having none.
+      #
+      # A release tag with entries still pending fails too. They are in the tagged tree, so they ship
+      # in this release, and leaving them would credit them to the next one. That happens when a fix
+      # reaches the release branch after its minor was batched, or when a patch forgot to
+      # batch a late backport; RELEASING.md says how to fold them in.
+      - name: Read the release notes
+        id: notes
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/}"
+          core="${tag%%-*}"
+          file=".changes/${core}.md"
+          # The file's first line is its `## [<version>] - <date>` heading, which the release title
+          # already says.
+          if [ -f "${file}" ]; then
+            notes=$(tail -n +2 "${file}" | sed '/./,$!d')
+            # A pre-release tagged after the batch still ships any fix that arrived since, so it lists
+            # those too. A release tag with such entries fails below instead.
+            if [ "${tag}" != "${core}" ] && compgen -G ".changes/unreleased/*.yaml" > /dev/null; then
+              pending=$(changie batch "${core}" --dry-run | tail -n +2 | sed '/./,$!d')
+              notes=$(printf '%s\n\n%s\n\n%s' "${notes}" \
+                "Also in this build, and not yet in ${file}:" "${pending}")
+            fi
+          elif [ "${tag}" != "${core}" ]; then
+            notes=$(changie batch "${core}" --dry-run | tail -n +2 | sed '/./,$!d')
+          else
+            echo "::error::${file} does not exist. Run \`changie batch ${tag}\` and \`changie merge\`" \
+              "before tagging; see \"Changelog\" in RELEASING.md."
+            exit 1
+          fi
+          if ! grep -q '^- ' <<< "${notes}"; then
+            if [ "${tag}" = "${core}" ]; then
+              echo "::error::${file} lists no changes"
+              exit 1
+            fi
+            notes="No changes are recorded for this pre-release."
+          fi
+          if [ "${tag}" = "${core}" ] && compgen -G ".changes/unreleased/*.yaml" > /dev/null; then
+            echo "::error::.changes/unreleased/ still holds entries, which ship in ${tag} but are not in" \
+              "${file}. Fold them in as \"When releasing\" in RELEASING.md describes, then tag again."
+            exit 1
+          fi
+          delimiter="NOTES_$(openssl rand -hex 16)"
+          {
+            echo "notes<<${delimiter}"
+            echo "${notes}"
+            echo "${delimiter}"
+          } >> "$GITHUB_OUTPUT"
+          echo "${notes}"
 
       # The version check above proves the tag and gradle.properties agree, but both live in the
       # tagged commit and whoever pushed the tag wrote both, so agreeing proves nothing about where
@@ -252,16 +311,16 @@ jobs:
       # publish-image and github-release that token carries `packages: write` and `contents: write`.
       # Nothing in these three jobs uses git auth after checkout: gh takes GH_TOKEN from the
       # environment. verify-version keeps its credentials, because it does fetch from origin.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Set up Java 21
-        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v4
+      - name: Set up Java 25
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
-          java-version: 21
+          java-version: 25
 
       # No cache anywhere on the release path. setup-gradle writes cache entries only from jobs on the
       # default branch and reads them everywhere else, and its last restore key is scoped to the
@@ -308,46 +367,10 @@ jobs:
       id-token: write
     steps:
       # The verified commit and no persisted token, for the reasons publish-maven gives.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-
-      - name: Set up Java 21
-        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v4
-        with:
-          distribution: temurin
-          java-version: 21
-
-      # No cache, for the reason publish-maven gives.
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
-        with:
-          cache-disabled: true
-
-      # Gradle builds the distribution and assembles the context; Docker only packages it. Building
-      # inside the Dockerfile instead would re-resolve every dependency per architecture and throw
-      # away the Gradle cache this runner already has.
-      - name: Assemble the Docker build context
-        run: ./gradlew :server:dockerContext
-
-      # The arm64 leg has to execute the Dockerfile's apt and useradd steps, which are native
-      # instructions — hence emulation. The payload itself is architecture-independent Java, so this
-      # only pays for a handful of package operations. If the emulated leg becomes slow enough to
-      # matter, the faster arrangement is a matrix over ubuntu-latest and ubuntu-24.04-arm that pushes
-      # by digest, plus a job that merges them into one manifest list.
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
-
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-
-      - name: Log in to ghcr.io
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Derive image tags
         id: meta
@@ -371,22 +394,16 @@ jobs:
           flavor: |
             latest=false
 
+      # No Gradle cache, for the reason publish-maven gives.
       - name: Build and push
         id: build
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        uses: ./.github/actions/push-server-image
         with:
-          context: server/build/docker
-          platforms: linux/amd64,linux/arm64
-          push: true
           tags: ${{ steps.meta.outputs.tags }}
-          build-args: |
-            IMAGE_VERSION=${{ needs.verify-version.outputs.version }}
-            IMAGE_REVISION=${{ github.sha }}
-          # An SBOM and a max-detail provenance attestation, both attached to the image in the
-          # registry. This is what lets a consumer answer "what is in this image and what built it"
-          # without trusting a separate document.
-          sbom: true
-          provenance: mode=max
+          version: ${{ needs.verify-version.outputs.version }}
+          attest: "true"
+          gradle-cache-disabled: "true"
+          registry-token: ${{ secrets.GITHUB_TOKEN }}
 
       # A signature over the image digest. Keyless, so there is no signing key to leak or rotate:
       # the certificate binds the signature to this workflow file and the ref it ran on, which is
@@ -410,16 +427,16 @@ jobs:
       contents: write
     steps:
       # The verified commit and no persisted token, for the reasons publish-maven gives.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Set up Java 21
-        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v4
+      - name: Set up Java 25
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
-          java-version: 21
+          java-version: 25
 
       # No cache, for the reason publish-maven gives.
       - name: Set up Gradle
@@ -442,6 +459,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PRERELEASE: ${{ needs.verify-version.outputs.prerelease }}
           LATEST: ${{ needs.verify-version.outputs.latest }}
+          NOTES: ${{ needs.verify-version.outputs.notes }}
         run: |
           set -euo pipefail
           tag="${GITHUB_REF#refs/tags/}"
@@ -454,7 +472,8 @@ jobs:
             # defaults to GitHub deciding for itself from dates and version numbers, which would badge
             # a patch on an older line as the newest release; verify-version has already settled the
             # answer, so pass it rather than let it be guessed.
-            args=(--title "${tag}" --generate-notes)
+            printf '%s\n' "${NOTES}" > "${RUNNER_TEMP}/notes.md"
+            args=(--title "${tag}" --notes-file "${RUNNER_TEMP}/notes.md")
             if [ "${PRERELEASE}" = "true" ]; then
               args+=(--prerelease)
             fi

@@ -24,6 +24,19 @@ public final class TimelineEvent {
   private final @Nullable String detail;
   private final @Nullable String operator;
 
+  /**
+   * Creates a timeline entry.
+   *
+   * @param timestamp when the event was recorded
+   * @param type the event type name
+   * @param stepIndex the step index for a step-level event, or {@code null} for a saga-level event
+   * @param stepName the step name for a step-level event, or {@code null} for a saga-level event
+   * @param resultingStatus the saga status the event transitioned to, or {@code null} for a
+   *     step-level event
+   * @param detail the human-readable detail, or {@code null} if none
+   * @param operator the operator who performed an intervention, or {@code null} for a
+   *     non-intervention event
+   */
   public TimelineEvent(
       Instant timestamp,
       String type,
@@ -41,27 +54,47 @@ public final class TimelineEvent {
     this.operator = operator;
   }
 
-  /** When the event was recorded. */
+  /**
+   * When the event was recorded.
+   *
+   * @return the event's timestamp
+   */
   public Instant getTimestamp() {
     return timestamp;
   }
 
-  /** The event type name (e.g. {@code "STEP_FAILED"}, {@code "SAGA_RECOVERING"}). */
+  /**
+   * The event type name (e.g. {@code "STEP_FAILED"}, {@code "SAGA_RECOVERING"}).
+   *
+   * @return the event type name
+   */
   public String getType() {
     return type;
   }
 
-  /** The step index for a step-level event, or {@code null} for a saga-level event. */
+  /**
+   * The step index for a step-level event, or {@code null} for a saga-level event.
+   *
+   * @return the step index, or {@code null}
+   */
   public @Nullable Integer getStepIndex() {
     return stepIndex;
   }
 
-  /** The step name for a step-level event, or {@code null} for a saga-level event. */
+  /**
+   * The step name for a step-level event, or {@code null} for a saga-level event.
+   *
+   * @return the step name, or {@code null}
+   */
   public @Nullable String getStepName() {
     return stepName;
   }
 
-  /** The saga status this event transitioned to, or {@code null} for a step-level event. */
+  /**
+   * The saga status this event transitioned to, or {@code null} for a step-level event.
+   *
+   * @return the resulting status, or {@code null}
+   */
   public @Nullable SagaStatus getResultingStatus() {
     return resultingStatus;
   }
@@ -69,13 +102,21 @@ public final class TimelineEvent {
   /**
    * A human-readable detail: the failure error message (step failures), the escalation reason
    * ({@code SAGA_ESCALATED}), or the operator's reason (interventions); {@code null} if none. Never
-   * a raw step input/output payload.
+   * a raw step input/output payload. A detail longer than 1024 chars (e.g. a step failure message
+   * embedding a downstream response body) is cut and suffixed with {@code "... (truncated)"}; the
+   * full text remains in the store.
+   *
+   * @return the detail text, possibly truncated, or {@code null}
    */
   public @Nullable String getDetail() {
     return detail;
   }
 
-  /** The operator who performed an intervention, or {@code null} for a non-intervention event. */
+  /**
+   * The operator who performed an intervention, or {@code null} for a non-intervention event.
+   *
+   * @return the operator, or {@code null}
+   */
   public @Nullable String getOperator() {
     return operator;
   }

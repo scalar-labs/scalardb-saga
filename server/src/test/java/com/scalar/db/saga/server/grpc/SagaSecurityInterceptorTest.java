@@ -8,14 +8,16 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.rpc.GetSagaRequest;
 import com.scalar.db.saga.rpc.SagaServiceGrpc;
 import com.scalar.db.saga.rpc.SagaServiceGrpc.SagaServiceBlockingStub;
 import com.scalar.db.saga.rpc.SagaSnapshot;
 import com.scalar.db.saga.rpc.StartSagaRequest;
+import com.scalar.db.saga.server.SagaWaiterRegistry;
 import com.scalar.db.saga.server.security.SagaAuthRequest;
 import com.scalar.db.saga.server.security.SagaAuthUnavailableException;
 import com.scalar.db.saga.server.security.SagaAuthenticationException;
@@ -59,16 +61,21 @@ class SagaSecurityInterceptorTest {
 
   @BeforeEach
   void setUp() throws IOException {
-    SagaOrchestrator orchestrator = mock(SagaOrchestrator.class);
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
     when(orchestrator.getStateSnapshot(any())).thenReturn(snapshot("s-1", SagaStatus.RUNNING));
-    when(orchestrator.startAsync(anyString(), anyMap())).thenReturn("gen-1");
+    when(orchestrator.startAsyncReturningSnapshot(any(), anyString(), any(), anyMap(), any()))
+        .thenReturn(snapshot("s-1", SagaStatus.RUNNING));
     String name = InProcessServerBuilder.generateName();
     Server server =
         InProcessServerBuilder.forName(name)
             .directExecutor()
             .addService(
                 ServerInterceptors.intercept(
-                    new SagaServiceImpl(orchestrator, 0L, 60_000L),
+                    new SagaServiceImpl(
+                        orchestrator,
+                        cap -> Math.min(60_000L, cap),
+                        new java.util.concurrent.CompletableFuture<>(),
+                        new SagaWaiterRegistry()),
                     new SagaSecurityInterceptor(new RoleHeaderProvider())))
             .build()
             .start();
@@ -98,8 +105,10 @@ class SagaSecurityInterceptorTest {
     // Act
     StatusRuntimeException error = callGetExpectingError(stub(null));
 
-    // Assert
+    // Assert — the refusal also carries the code, like every other daemon response
     assertThat(error.getStatus().getCode()).isEqualTo(Status.Code.UNAUTHENTICATED);
+    assertThat(ErrorInfos.errorInfo(error).getReason())
+        .isEqualTo(SagaErrorCode.UNAUTHENTICATED.code());
   }
 
   @Test
@@ -121,6 +130,8 @@ class SagaSecurityInterceptorTest {
 
     // Assert
     assertThat(error.getStatus().getCode()).isEqualTo(Status.Code.PERMISSION_DENIED);
+    assertThat(ErrorInfos.errorInfo(error).getReason())
+        .isEqualTo(SagaErrorCode.PERMISSION_DENIED.code());
   }
 
   @Test
@@ -128,7 +139,7 @@ class SagaSecurityInterceptorTest {
     // Act — WRITE satisfies StartSaga; the call reaches the handler and returns the snapshot
     SagaSnapshot response = stub("write").startSaga(startByName("transfer"));
 
-    // Assert (the id is the mocked getStateSnapshot's; reaching it proves auth passed)
+    // Assert (the id is the mocked start's; reaching it proves auth passed)
     assertThat(response.getSagaId()).isEqualTo("s-1");
   }
 
@@ -153,8 +164,12 @@ class SagaSecurityInterceptorTest {
     StatusRuntimeException error = callGetExpectingError(stubFor(throwing));
 
     // Assert — mapped to INTERNAL (fail closed), not UNAUTHENTICATED, so a server-side fault is not
-    // reported to the caller as a bad credential.
+    // reported to the caller as a bad credential. INTERNAL_ERROR, not an auth-specific code: all
+    // that is known here is that the server broke unexpectedly, and a more specific code would
+    // hand probing callers an oracle on the auth subsystem.
     assertThat(error.getStatus().getCode()).isEqualTo(Status.Code.INTERNAL);
+    assertThat(ErrorInfos.errorInfo(error).getReason())
+        .isEqualTo(SagaErrorCode.INTERNAL_ERROR.code());
   }
 
   @Test
@@ -179,10 +194,12 @@ class SagaSecurityInterceptorTest {
 
     // Assert — retryable UNAVAILABLE, not UNAUTHENTICATED (not a bad credential) or INTERNAL.
     assertThat(error.getStatus().getCode()).isEqualTo(Status.Code.UNAVAILABLE);
+    assertThat(ErrorInfos.errorInfo(error).getReason())
+        .isEqualTo(SagaErrorCode.SERVICE_UNAVAILABLE.code());
   }
 
   private SagaServiceBlockingStub stubFor(SagaSecurityProvider provider) throws IOException {
-    SagaOrchestrator orchestrator = mock(SagaOrchestrator.class);
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
     when(orchestrator.getStateSnapshot(any())).thenReturn(snapshot("s-1", SagaStatus.RUNNING));
     String name = InProcessServerBuilder.generateName();
     Server server =
@@ -190,7 +207,11 @@ class SagaSecurityInterceptorTest {
             .directExecutor()
             .addService(
                 ServerInterceptors.intercept(
-                    new SagaServiceImpl(orchestrator, 0L, 60_000L),
+                    new SagaServiceImpl(
+                        orchestrator,
+                        cap -> Math.min(60_000L, cap),
+                        new java.util.concurrent.CompletableFuture<>(),
+                        new SagaWaiterRegistry()),
                     new SagaSecurityInterceptor(provider)))
             .build()
             .start();
@@ -221,7 +242,7 @@ class SagaSecurityInterceptorTest {
 
   private static SagaStateSnapshot snapshot(String sagaId, SagaStatus status) {
     Instant now = Instant.ofEpochSecond(1_700_000_000L);
-    return new SagaStateSnapshot(sagaId, "transfer", status, "owner-1", "v1", now, now);
+    return new SagaStateSnapshot(sagaId, "transfer", status, "v1", now, now);
   }
 
   /**

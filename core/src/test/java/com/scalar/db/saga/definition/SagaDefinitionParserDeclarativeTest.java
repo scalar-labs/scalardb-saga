@@ -7,6 +7,10 @@ import com.scalar.db.saga.api.HttpMethod;
 import com.scalar.db.saga.definition.SagaDefinition.ServiceStep;
 import com.scalar.db.saga.definition.SagaDefinition.ServiceStep.Phase;
 import com.scalar.db.saga.exception.SagaDefinitionException;
+import com.scalar.db.saga.exception.SagaErrorCode;
+import java.math.BigDecimal;
+import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class SagaDefinitionParserDeclarativeTest {
@@ -35,6 +39,111 @@ class SagaDefinitionParserDeclarativeTest {
     assertThat(execution.getPath()).isEqualTo("/debit");
     assertThat(execution.getJsonBody()).containsEntry("amount", "${amount}");
     assertThat(execution.getOutput()).containsEntry("debitId", "$.debit_id");
+  }
+
+  @Test
+  void parseJson_jsonBodyWithLiteralsAndNesting_keepsJsonTypes() {
+    // Arrange
+    String json =
+        """
+        {"name": "order", "mode": "SAGA", "steps": [
+          {"name": "reserve", "service": "inventory",
+           "execution": {"path": "/reserve", "jsonBody": {
+             "quantity": 2, "price": 9.5, "gift": true, "note": null,
+             "item": {"sku": "${sku}"}, "tags": ["a", 1]}},
+           "compensation": {"path": "/release"}}]}""";
+
+    // Act
+    SagaDefinition definition = SagaDefinitionParser.parseJson(json);
+
+    // Assert
+    ServiceStep step = (ServiceStep) definition.getSteps().get(0);
+    HttpCall execution = (HttpCall) step.getPhase(Phase.EXECUTION).orElseThrow();
+    assertThat(execution.getJsonBody())
+        .containsEntry("quantity", 2L)
+        .containsEntry("price", new BigDecimal("9.5"))
+        .containsEntry("gift", true)
+        .containsEntry("note", null)
+        .containsEntry("item", Map.of("sku", "${sku}"))
+        .containsEntry("tags", List.of("a", 1L));
+  }
+
+  @Test
+  void parseJson_jsonBodyDecimalBeyondDoublePrecision_keepsItExactly() {
+    // Arrange
+    String json =
+        """
+        {"name": "order", "mode": "SAGA", "steps": [
+          {"name": "reserve", "service": "inventory",
+           "execution": {"path": "/reserve", "jsonBody": {"price": 12345678901234567.89}},
+           "compensation": {"path": "/release"}}]}""";
+
+    // Act
+    SagaDefinition definition = SagaDefinitionParser.parseJson(json);
+
+    // Assert
+    ServiceStep step = (ServiceStep) definition.getSteps().get(0);
+    HttpCall execution = (HttpCall) step.getPhase(Phase.EXECUTION).orElseThrow();
+    assertThat(execution.getJsonBody())
+        .containsEntry("price", new BigDecimal("12345678901234567.89"));
+  }
+
+  @Test
+  void parseYaml_jsonBodyDecimal_keepsItExactly() {
+    // Arrange
+    String yaml =
+        """
+        name: order
+        steps:
+          - name: reserve
+            service: inventory
+            execution:
+              path: /reserve
+              jsonBody:
+                price: 0.1
+            compensation:
+              path: /release
+        """;
+
+    // Act
+    SagaDefinition definition = SagaDefinitionParser.parseYaml(yaml);
+
+    // Assert
+    ServiceStep step = (ServiceStep) definition.getSteps().get(0);
+    HttpCall execution = (HttpCall) step.getPhase(Phase.EXECUTION).orElseThrow();
+    assertThat(execution.getJsonBody()).containsEntry("price", new BigDecimal("0.1"));
+  }
+
+  @Test
+  void parseJson_jsonBodyNumberWithTooManyDigits_throwsStepDefinitionError() {
+    // Arrange
+    String json =
+        """
+        {"name": "order", "mode": "SAGA", "steps": [
+          {"name": "reserve", "service": "inventory",
+           "execution": {"path": "/reserve", "jsonBody": {"price": 1e2000}},
+           "compensation": {"path": "/release"}}]}""";
+
+    // Act & Assert — reported for the step, like every other call-spec error.
+    assertThatThrownBy(() -> SagaDefinitionParser.parseJson(json))
+        .isInstanceOf(SagaDefinitionException.class)
+        .extracting(e -> ((SagaDefinitionException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.INVALID_STEP_DEFINITION);
+  }
+
+  @Test
+  void parseJson_jsonBodyNotAnObject_throwsException() {
+    // Arrange
+    String json =
+        """
+        {"name": "order", "mode": "SAGA", "steps": [
+          {"name": "reserve", "service": "inventory",
+           "execution": {"path": "/reserve", "jsonBody": [1, 2]},
+           "compensation": {"path": "/release"}}]}""";
+
+    // Act & Assert
+    assertThatThrownBy(() -> SagaDefinitionParser.parseJson(json))
+        .isInstanceOf(SagaDefinitionException.class);
   }
 
   @Test

@@ -15,6 +15,7 @@ import com.scalar.db.saga.definition.SagaDefinition.ServiceStep.Phase;
 import com.scalar.db.saga.exception.StepCompensationException;
 import com.scalar.db.saga.exception.StepExecutionException;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 class DeclarativeBindingStepTest {
@@ -25,7 +26,10 @@ class DeclarativeBindingStepTest {
 
   private static DeclarativeBindingStep adapter(TransportAdapter transport) {
     return new DeclarativeBindingStep(
-        "debit", transport, Map.of(Phase.EXECUTION, EXECUTION, Phase.COMPENSATION, COMPENSATION));
+        "debit",
+        service -> transport,
+        "account",
+        Map.of(Phase.EXECUTION, EXECUTION, Phase.COMPENSATION, COMPENSATION));
   }
 
   @Test
@@ -128,5 +132,73 @@ class DeclarativeBindingStepTest {
     // Act & Assert
     assertThat(catchThrowable(() -> adapter(transport).compensate(CTX)))
         .isInstanceOf(StepCompensationException.class);
+  }
+
+  @Test
+  void execute_resolveMiss_throwsRetryableKnownNotCommittedStepExecutionException() {
+    // Arrange — the resolver reports no endpoint for the service (removed, or configuration not
+    // yet propagated): a pre-send miss that must be retryable and known-not-committed.
+    DeclarativeBindingStep step =
+        new DeclarativeBindingStep(
+            "debit",
+            service -> {
+              throw new TransportException("no endpoint for " + service, true, true);
+            },
+            "account",
+            Map.of(Phase.EXECUTION, EXECUTION, Phase.COMPENSATION, COMPENSATION));
+
+    // Act
+    Throwable thrown = catchThrowable(() -> step.execute(CTX));
+
+    // Assert
+    assertThat(thrown).isInstanceOf(StepExecutionException.class);
+    assertThat(((StepExecutionException) thrown).isRetryable()).isTrue();
+    assertThat(((StepExecutionException) thrown).knownNotCommitted()).isTrue();
+  }
+
+  @Test
+  void compensate_resolveMiss_throwsStepCompensationException() {
+    // Arrange — a resolve miss on the compensation path surfaces as a compensation failure, which
+    // the engine never retries inline (recovery retries the compensation later).
+    DeclarativeBindingStep step =
+        new DeclarativeBindingStep(
+            "debit",
+            service -> {
+              throw new TransportException("no endpoint for " + service, true, true);
+            },
+            "account",
+            Map.of(Phase.EXECUTION, EXECUTION, Phase.COMPENSATION, COMPENSATION));
+
+    // Act
+    Throwable thrown = catchThrowable(() -> step.compensate(CTX));
+
+    // Assert
+    assertThat(thrown).isInstanceOf(StepCompensationException.class);
+  }
+
+  @Test
+  void execute_resolvesPerCall_eachCallSeesTheCurrentAdapter() throws Exception {
+    // Arrange — the resolver's answer changes between calls, as a configuration swap would make it
+    AtomicReference<TransportAdapter> current = new AtomicReference<>();
+    TransportAdapter first = mock(TransportAdapter.class);
+    TransportAdapter second = mock(TransportAdapter.class);
+    when(first.call(any(), any(), any())).thenReturn(StepResult.empty());
+    when(second.call(any(), any(), any())).thenReturn(StepResult.empty());
+    DeclarativeBindingStep step =
+        new DeclarativeBindingStep(
+            "debit",
+            service -> java.util.Objects.requireNonNull(current.get()),
+            "account",
+            Map.of(Phase.EXECUTION, EXECUTION, Phase.COMPENSATION, COMPENSATION));
+
+    // Act
+    current.set(first);
+    step.execute(CTX);
+    current.set(second);
+    step.execute(CTX);
+
+    // Assert — late binding: one call each, not two on the first
+    verify(first).call(eq(EXECUTION), any(), eq("debit"));
+    verify(second).call(eq(EXECUTION), any(), eq("debit"));
   }
 }

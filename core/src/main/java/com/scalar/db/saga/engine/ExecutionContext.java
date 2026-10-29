@@ -51,7 +51,7 @@ public class ExecutionContext implements SagaContext {
 
   ExecutionContext(String sagaId, Map<String, Object> input, SagaStateSnapshot currentState) {
     this.sagaId = sagaId;
-    input.values().forEach(this::validateType);
+    validateInput(input);
     this.data = new HashMap<>(input);
     this.currentState = currentState;
   }
@@ -100,6 +100,12 @@ public class ExecutionContext implements SagaContext {
 
   // --- Engine-internal (not accessible from Step implementations) ---
 
+  /**
+   * The sequence number the next event appended for this saga will carry, which is the count of
+   * events recorded so far.
+   *
+   * @return the next event sequence
+   */
   public int nextSequence() {
     return nextEventSequence;
   }
@@ -112,6 +118,11 @@ public class ExecutionContext implements SagaContext {
     this.nextEventSequence = seq;
   }
 
+  /**
+   * The saga's state as this execution last read it from or wrote it to the store.
+   *
+   * @return the current state snapshot
+   */
   public SagaStateSnapshot getCurrentState() {
     return currentState;
   }
@@ -137,7 +148,7 @@ public class ExecutionContext implements SagaContext {
   }
 
   void merge(StepResult result) {
-    result.getOutput().values().forEach(this::validateType);
+    result.getOutput().values().forEach(ExecutionContext::validateType);
     data.putAll(result.getOutput());
   }
 
@@ -145,7 +156,33 @@ public class ExecutionContext implements SagaContext {
     return Map.copyOf(data);
   }
 
-  private void validateType(Object value) {
+  /**
+   * Rejects input a saga context cannot hold. Package-private and static so the engine can apply it
+   * <em>before</em> persisting a saga: this used to run only here, on the execution thread, which
+   * left a caller of the asynchronous start path waiting out its whole wait bound for input that
+   * was invalid on arrival.
+   *
+   * <p>Rejects with a stdlib {@link IllegalArgumentException}, which the two entry points that know
+   * the map came from a caller convert to a typed one: {@code SagaEngine.createSaga} for a saga's
+   * input, {@code DefaultSagaOrchestrator.resumeParked} for a callback's output.
+   *
+   * <p>The conversion is deliberately theirs rather than this method's, because {@link
+   * #validateType} is shared with {@link #put} and {@link #merge}. Those run over input read back
+   * from the store during a replay and over a participant's reply, where a rejection is a corrupt
+   * row or a malformed downstream response — a server fault, not anyone's bad request. Note the
+   * constructor above is not that path: {@code SagaEngine.replayEvents} passes it an empty map and
+   * feeds the stored input through {@code put}.
+   */
+  static void validateInput(Map<String, Object> input) {
+    input.values().forEach(ExecutionContext::validateType);
+  }
+
+  private static void validateType(@Nullable Object value) {
+    if (value == null) {
+      // Reachable from a JSON null in a request body, which the engine converts to a 400 at the
+      // start boundary; dereferencing it below would surface a client mistake as a 500.
+      throw new IllegalArgumentException("SagaContext does not allow null values");
+    }
     if (ALLOWED_TYPES.contains(value.getClass())) {
       return;
     }

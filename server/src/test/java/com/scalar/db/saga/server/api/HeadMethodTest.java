@@ -3,7 +3,8 @@ package com.scalar.db.saga.server.api;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
-import com.scalar.db.saga.api.SagaOrchestrator;
+import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
+import com.scalar.db.saga.server.SagaWaiterRegistry;
 import com.scalar.db.saga.server.security.SagaAuthRequest;
 import com.scalar.db.saga.server.security.SagaIdentity;
 import com.scalar.db.saga.server.security.SagaRole;
@@ -38,15 +39,25 @@ class HeadMethodTest {
 
   @BeforeEach
   void setUp() {
-    app = Javalin.create();
-    SagaSecurityHandler.register(app, new FullAccessProvider());
-    ErrorMapper.register(app);
-    HealthResource.register(app);
-    SagaResource.register(app, mock(SagaOrchestrator.class), 0L);
-    // A route registered with no operation, to prove the HEAD branch did not weaken the fail-closed
-    // rejection of an untagged route on its normal (GET) path.
-    app.get("/untagged", ctx -> ctx.result("should never be served"));
-    app.start(0);
+    app =
+        Javalin.create(
+            cfg -> {
+              SagaSecurityHandler.register(cfg.routes, new FullAccessProvider());
+              ErrorMapper.register(cfg.routes);
+              HealthResource.register(cfg.routes);
+              SagaResource.register(
+                  cfg.routes,
+                  mock(DefaultSagaOrchestrator.class),
+                  0L,
+                  new java.util.concurrent.CompletableFuture<>(),
+                  new SagaWaiterRegistry());
+              // A route registered with no operation, to prove the HEAD branch did not weaken the
+              // fail-closed rejection of an untagged route on its normal (GET) path.
+              cfg.routes.get("/untagged", ctx -> ctx.result("should never be served"));
+            });
+    // Loopback, not the wildcard: a wildcard bind can share a port with another suite's
+    // loopback server, which then takes the connection and answers this test's requests.
+    app.start("127.0.0.1", 0);
   }
 
   @AfterEach
@@ -88,7 +99,7 @@ class HeadMethodTest {
 
   private HttpResponse<String> send(String method, String path) throws Exception {
     return http.send(
-        HttpRequest.newBuilder(URI.create("http://localhost:" + app.port() + path))
+        HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + app.port() + path))
             .method(method, HttpRequest.BodyPublishers.noBody())
             .build(),
         BodyHandlers.ofString());

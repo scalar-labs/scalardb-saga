@@ -7,6 +7,8 @@ import com.scalar.db.saga.api.SagaPage;
 import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
+import com.scalar.db.saga.integration.IntegrationTestStore;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -16,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.function.Supplier;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -38,12 +41,9 @@ class ScalarDbSagaStoreListIntegrationTest {
   void setUp() {
     dbPath = tempDir.resolve("saga-list-it.db");
     Properties props = new Properties();
-    props.setProperty("scalar.db.storage", "jdbc");
-    props.setProperty(
-        "scalar.db.contact_points",
-        "jdbc:sqlite:" + dbPath.toAbsolutePath() + "?busy_timeout=10000");
+    IntegrationTestStore.configure(props, dbPath);
     // Multiple buckets so pagination must sweep across bucket boundaries.
-    props.setProperty("scalar.db.saga.store.num_buckets", "4");
+    props.setProperty("scalar.db.saga.store.scalardb.num_buckets", "4");
     factory = ScalarDbSagaStoreFactory.create(props); // creates the schema
     store = factory.createStore();
   }
@@ -141,13 +141,67 @@ class ScalarDbSagaStoreListIntegrationTest {
   }
 
   @Test
-  void listStateSnapshots_malformedTokenGiven_throwsIllegalArgumentException() {
+  void listStateSnapshots_waitingSagas_pagesBothWaitingSlicesWithoutGapsOrDuplicates() {
+    // Arrange — parks with a timeout are ordered by deadline, here the reverse of their park
+    // order, and three share one deadline so that cohort straddles a page; two parks have none.
+    Instant base = Instant.now().plus(1, ChronoUnit.DAYS).truncatedTo(ChronoUnit.SECONDS);
+    List<String> waiting = new ArrayList<>();
+    for (int i = 0; i < 6; i++) {
+      Instant deadline = i < 3 ? base.plusSeconds(100) : base.plusSeconds(10 - i);
+      waiting.add(parked("t-" + i, deadline).getSagaId());
+    }
+    waiting.add(parked("u-0", null).getSagaId());
+    waiting.add(parked("u-1", null).getSagaId());
+    store.createSaga("r-0", "order-saga", "engine-1", Map.of(), "v1");
+
+    // Act
+    List<String> byStatus = collectAll(SagaStatus.WAITING, 2);
+    List<String> all = paginate(SagaQuery::newBuilder, 2);
+
+    // Assert
+    assertThat(byStatus).containsExactlyInAnyOrderElementsOf(waiting).doesNotHaveDuplicates();
+    List<String> everything = new ArrayList<>(waiting);
+    everything.add("r-0");
+    assertThat(all).containsExactlyInAnyOrderElementsOf(everything).doesNotHaveDuplicates();
+  }
+
+  @Test
+  void listStateSnapshots_waitingSagasWithUpdatedWindow_filtersByParkTimeNotDeadline() {
+    // Arrange — the early parks carry the later deadlines, so a window applied to the deadline
+    // would select the wrong group
+    Instant base = Instant.now().plus(1, ChronoUnit.DAYS).truncatedTo(ChronoUnit.SECONDS);
+    List<String> early = new ArrayList<>();
+    for (int i = 0; i < 3; i++) {
+      early.add(parked("e-" + i, base.plusSeconds(100 - i)).getSagaId());
+    }
+    early.add(parked("e-none", null).getSagaId());
+    Instant split = afterNextMilli(Instant.now());
+    afterNextMilli(split);
+    List<String> late = new ArrayList<>();
+    for (int i = 0; i < 3; i++) {
+      late.add(parked("l-" + i, base.plusSeconds(i)).getSagaId());
+    }
+    late.add(parked("l-none", null).getSagaId());
+
+    // Act — page size 1, so filtered-out rows sit between every page
+    List<String> before =
+        paginate(() -> SagaQuery.newBuilder().status(SagaStatus.WAITING).updatedBefore(split), 1);
+    List<String> after =
+        paginate(() -> SagaQuery.newBuilder().status(SagaStatus.WAITING).updatedAfter(split), 1);
+
+    // Assert
+    assertThat(before).containsExactlyInAnyOrderElementsOf(early).doesNotHaveDuplicates();
+    assertThat(after).containsExactlyInAnyOrderElementsOf(late).doesNotHaveDuplicates();
+  }
+
+  @Test
+  void listStateSnapshots_malformedTokenGiven_throwsSagaIllegalArgumentException() {
     // Act & Assert
     assertThatThrownBy(
             () ->
                 store.listStateSnapshots(
                     SagaQuery.newBuilder().pageToken("!!!not-base64!!!").build()))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class);
   }
 
   // --- helpers ---
@@ -155,7 +209,24 @@ class ScalarDbSagaStoreListIntegrationTest {
   private void complete(String sagaId) {
     SagaStateSnapshot current = store.getStateSnapshot(sagaId).orElseThrow();
     store.recordStatusEvent(
-        current, store.getEventCount(sagaId), StatusEvent.completed(), current.getOwnerId());
+        current, store.getEventCount(sagaId), StatusEvent.completed(), "engine-1");
+  }
+
+  private SagaStateSnapshot parked(String sagaId, @Nullable Instant deadline) {
+    SagaStateSnapshot created = store.createSaga(sagaId, "order-saga", "engine-1", Map.of(), "v1");
+    return store.park(created, 1, StepEvent.pending(0, "approve"), deadline);
+  }
+
+  /**
+   * Waits until the clock passes {@code t}'s millisecond, the unit the store keeps, and returns it.
+   */
+  private static Instant afterNextMilli(Instant t) {
+    Instant now = Instant.now();
+    while (now.toEpochMilli() <= t.toEpochMilli()) {
+      Thread.onSpinWait();
+      now = Instant.now();
+    }
+    return now;
   }
 
   private List<String> collected(SagaStatus status, int pageSize) {

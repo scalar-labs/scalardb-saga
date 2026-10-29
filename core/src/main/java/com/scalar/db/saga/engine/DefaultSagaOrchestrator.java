@@ -11,15 +11,20 @@ import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.definition.SagaDefinitionParser;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaDefinitionNotServedException;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.exception.SagaOverloadedException;
+import com.scalar.db.saga.exception.SagaStepNotParkedException;
 import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.SagaStoreFactory;
 import com.scalar.db.saga.store.StepEvent;
 import com.scalar.db.saga.transport.CallbackUrlProvider;
+import com.scalar.db.saga.transport.HttpEndpointManager;
+import com.scalar.db.saga.transport.HttpEndpointRegistrar;
 import com.scalar.db.saga.transport.HttpServiceConfig;
-import java.net.URI;
 import java.net.http.HttpClient;
 import java.nio.file.Path;
 import java.time.Clock;
@@ -29,10 +34,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import net.jcip.annotations.ThreadSafe;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -61,11 +68,43 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    */
   public static final long DEFAULT_SHUTDOWN_TIMEOUT_MILLIS = 30_000L;
 
+  /**
+   * The default saga timeout in milliseconds applied when {@link
+   * Builder#defaultSagaTimeoutMillis(long)} is not called: {@code 0}, meaning no default is applied
+   * and definitions without a timeout of their own run without one. Exposed for the same reason as
+   * {@link #DEFAULT_SHUTDOWN_MODE}.
+   */
+  public static final long DEFAULT_SAGA_TIMEOUT_MILLIS = 0L;
+
+  /**
+   * The timeline bound applied when {@link Builder#maxTimelineEvents(int)} is not called:
+   * effectively unbounded, so an in-process (embedded) caller always sees a saga's full timeline. A
+   * remote front end serving {@link #getSagaDetail} over a network should configure a real bound —
+   * an unbounded timeline of a pathological saga can exceed a wire message limit and make the saga
+   * undiagnosable exactly when it matters.
+   */
+  public static final int DEFAULT_MAX_TIMELINE_EVENTS = Integer.MAX_VALUE;
+
+  /**
+   * The concurrent-start cap applied when {@link Builder#maxConcurrentSagaStarts(int)} is not
+   * called: {@code 0}, meaning no cap.
+   *
+   * <p>Off by default because the right value is a property of a deployment's store, hosts and saga
+   * durations, and a wrong one is worse than none: too low refuses work the daemon could have done,
+   * and too high is the unbounded behavior with extra machinery. The sizing method is on the
+   * builder setter.
+   */
+  public static final int DEFAULT_MAX_CONCURRENT_SAGA_STARTS = 0;
+
   private static final Logger logger = LoggerFactory.getLogger(DefaultSagaOrchestrator.class);
 
   // Embedded mode has no authenticated user, so admin interventions are attributed to this fixed
   // principal. A remote front end injects the request's authenticated identity instead.
   private static final String EMBEDDED_OPERATOR = "embedded";
+
+  // The longest a participant's own account of a failure may be when it is recorded. It bounds
+  // the size of the event row, since the text arrives from outside.
+  private static final int MAX_REPORTED_ERROR_CHARS = 1024;
 
   private final SagaEngine engine;
   private final SagaStore store;
@@ -73,16 +112,45 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   private final SagaRecoveryManager recoveryManager;
   private final SagaRetentionManager retentionManager;
   private final long shutdownTimeoutMillis;
+  private final int maxTimelineEvents;
+
+  /** The admission cap, or {@code null} when none is configured — the default. */
+  private final @Nullable AdmissionController admissionController;
+
   private final ExecutorService asyncExecutor;
+  private final SettlementListener settlementListener;
   private volatile boolean closed;
 
+  /**
+   * The saga names this deployment currently serves, or {@code null} when nothing has published a
+   * set.
+   *
+   * <p>Null is the embedded default: an application that registers a definition means to run it,
+   * and has its own call sites to stop calling. A front end whose configuration decides what is
+   * served — the daemon, whose definition files do — publishes a snapshot here after each
+   * configuration pass, which is what makes removing a definition file retire the saga.
+   *
+   * <p>Pushed rather than pulled, and an immutable snapshot rather than a live view: a start reads
+   * it without a lock, so it cannot contend with a configuration pass on the hot path.
+   *
+   * <p>A pass rejected before it applied anything publishes nothing, so the previously served set
+   * keeps serving. One rejected after that point does publish: what it committed before failing is
+   * live, and a definition registered by a pass that then fails on an unrelated one has to be
+   * served rather than refused until some later pass concludes. So the served set can narrow
+   * mid-pass, and anything added between the withdrawal and the registration has to keep that true.
+   */
+  private volatile @Nullable Set<String> servedDefinitions;
+
+  // Visible for testing: no production caller remains since build() moved to the 10-arg form.
   DefaultSagaOrchestrator(
       SagaEngine engine,
       SagaStore store,
       SagaDefinitionRegistry definitionRegistry,
       SagaRecoveryManager recoveryManager,
       SagaRetentionManager retentionManager,
-      long shutdownTimeoutMillis) {
+      long shutdownTimeoutMillis,
+      int maxTimelineEvents,
+      int maxConcurrentSagaStarts) {
     this(
         engine,
         store,
@@ -90,7 +158,10 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
         recoveryManager,
         retentionManager,
         shutdownTimeoutMillis,
-        Executors.newVirtualThreadPerTaskExecutor());
+        maxTimelineEvents,
+        maxConcurrentSagaStarts,
+        Executors.newVirtualThreadPerTaskExecutor(),
+        SettlementListener.NO_OP);
   }
 
   // Visible for testing
@@ -101,17 +172,54 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       SagaRecoveryManager recoveryManager,
       SagaRetentionManager retentionManager,
       long shutdownTimeoutMillis,
+      int maxTimelineEvents,
+      int maxConcurrentSagaStarts,
       ExecutorService asyncExecutor) {
+    this(
+        engine,
+        store,
+        definitionRegistry,
+        recoveryManager,
+        retentionManager,
+        shutdownTimeoutMillis,
+        maxTimelineEvents,
+        maxConcurrentSagaStarts,
+        asyncExecutor,
+        SettlementListener.NO_OP);
+  }
+
+  // Visible for testing
+  DefaultSagaOrchestrator(
+      SagaEngine engine,
+      SagaStore store,
+      SagaDefinitionRegistry definitionRegistry,
+      SagaRecoveryManager recoveryManager,
+      SagaRetentionManager retentionManager,
+      long shutdownTimeoutMillis,
+      int maxTimelineEvents,
+      int maxConcurrentSagaStarts,
+      ExecutorService asyncExecutor,
+      SettlementListener settlementListener) {
     this.engine = engine;
     this.store = store;
     this.definitionRegistry = definitionRegistry;
     this.recoveryManager = recoveryManager;
     this.retentionManager = retentionManager;
     this.shutdownTimeoutMillis = shutdownTimeoutMillis;
+    this.maxTimelineEvents = maxTimelineEvents;
+    // No cap means no controller, rather than a controller with an unreachable cap: the seams then
+    // hold a null and skip the semaphore entirely, so the default costs nothing.
+    this.admissionController =
+        maxConcurrentSagaStarts > 0 ? new AdmissionController(maxConcurrentSagaStarts) : null;
     this.asyncExecutor = asyncExecutor;
+    this.settlementListener = settlementListener;
   }
 
-  /** Creates a new builder for constructing a {@link DefaultSagaOrchestrator}. */
+  /**
+   * Creates a new builder for constructing a {@link DefaultSagaOrchestrator}.
+   *
+   * @return a builder with every setting at its default
+   */
   public static Builder newBuilder() {
     return new Builder();
   }
@@ -120,6 +228,14 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   // Registration
   // ---------------------------------------------------------------------------
 
+  /**
+   * Registers a saga definition, making it startable by name. Every step is resolved first, so a
+   * definition whose steps cannot be resolved is rejected with a {@link
+   * com.scalar.db.saga.exception.SagaDefinitionException} before anything is stored. The definition
+   * is then persisted, where other replicas and recovery can read it, and cached in memory.
+   *
+   * @param definition the definition to register
+   */
   public void register(SagaDefinition definition) {
     Objects.requireNonNull(definition, "definition must not be null");
     // Eagerly resolve all steps — fail fast on missing resources or unresolvable constructors.
@@ -128,9 +244,87 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     definitionRegistry.register(definition);
   }
 
+  /**
+   * Publishes the set of saga names this deployment serves; every other registered saga is refused
+   * at start with {@link SagaDefinitionNotServedException}.
+   *
+   * <p>For a front end whose configuration decides what runs. The store is append-only, so a
+   * definition stays registered long after the configuration that introduced it is gone; without
+   * this, nothing could ever be taken out of service. Sagas already running are unaffected — they
+   * resume by version and never come through the start check.
+   *
+   * <p>Call it after each configuration change, with the complete set.
+   *
+   * @param sagaNames the saga names to serve, copied defensively
+   */
+  public void serve(Set<String> sagaNames) {
+    this.servedDefinitions = Set.copyOf(sagaNames);
+  }
+
+  /**
+   * The definition of {@code sagaName} that a name-only start would run — the store's latest — or
+   * {@code null} when nothing is registered under that name.
+   *
+   * <p>For a caller that maintains definition files and needs to know whether they still describe
+   * what is serving. Registered content is immutable and the store is append-only, so re-writing an
+   * older version's file registers nothing and leaves the newer version winning; without asking,
+   * such a caller cannot tell that its files and the fleet disagree. It gets the whole definition
+   * rather than the version alone because, on finding them disagreeing, what serves is the only
+   * thing left worth validating.
+   *
+   * @param sagaName the saga name
+   * @return the definition a name-only start would run, or {@code null} when nothing is registered
+   *     under that name
+   */
+  public @Nullable SagaDefinition latestDefinition(String sagaName) {
+    Objects.requireNonNull(sagaName, "sagaName must not be null");
+    return definitionRegistry.resolve(sagaName);
+  }
+
+  /**
+   * Whether {@code version} of {@code sagaName} is already registered.
+   *
+   * <p>With {@link #latestDefinition} this distinguishes the two ways a definition file can name a
+   * version that is not serving: a NEW version, which is an ordinary upgrade about to become the
+   * latest, and an OLDER one that is already stored, which is a rollback that will register nothing
+   * and leave the newer version running.
+   *
+   * @param sagaName the saga name
+   * @param version the definition version
+   * @return whether that version of the definition is registered
+   */
+  public boolean isDefinitionRegistered(String sagaName, String version) {
+    Objects.requireNonNull(sagaName, "sagaName must not be null");
+    Objects.requireNonNull(version, "version must not be null");
+    return definitionRegistry.resolve(sagaName, version) != null;
+  }
+
+  /**
+   * Registers the saga definition read from a file, as {@link #register(SagaDefinition)} does for a
+   * parsed one.
+   *
+   * @param definitionFile the path of a JSON ({@code .json}) or YAML ({@code .yaml}, {@code .yml})
+   *     definition file
+   */
   public void register(Path definitionFile) {
     Objects.requireNonNull(definitionFile, "definitionFile must not be null");
     register(SagaDefinitionParser.parseFile(definitionFile));
+  }
+
+  /**
+   * The narrow seam for replacing the full HTTP endpoint set at runtime (configuration hot reload).
+   * See {@link HttpEndpointRegistrar} for the swap semantics — reuse on unchanged topology,
+   * in-place header rotation, graceful retirement — and the embedded-mode contract: a class step's
+   * injected {@code SagaHttpClient} is pinned when its plan is built and is NOT rebound by a swap.
+   *
+   * <p>The returned registrar shares this orchestrator's lifecycle: a swap applied after {@link
+   * #close()} throws {@link IllegalStateException}, so a hot-reload caller racing shutdown must be
+   * prepared for it.
+   *
+   * @return the registrar for this orchestrator's HTTP endpoint set
+   */
+  public HttpEndpointRegistrar httpEndpointRegistrar() {
+    return engine.httpEndpointRegistrar();
   }
 
   // ---------------------------------------------------------------------------
@@ -142,8 +336,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(sagaName, "sagaName must not be null");
     Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
-    SagaDefinition def = requireLatestDefinition(sagaName);
-    return engine.execute(def, null, input);
+    return executeAdmitted(() -> requireLatestDefinition(sagaName), null, input);
   }
 
   @Override
@@ -152,8 +345,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(sagaName, "sagaName must not be null");
     Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
-    SagaDefinition def = requireLatestDefinition(sagaName);
-    engine.execute(def, sagaId, input);
+    executeAdmitted(() -> requireLatestDefinition(sagaName), sagaId, input);
   }
 
   @Override
@@ -161,8 +353,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(id, "id must not be null");
     Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
-    SagaDefinition def = requireVersionedDefinition(id);
-    return engine.execute(def, null, input);
+    return executeAdmitted(() -> requireVersionedDefinition(id), null, input);
   }
 
   @Override
@@ -171,8 +362,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(id, "id must not be null");
     Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
-    SagaDefinition def = requireVersionedDefinition(id);
-    engine.execute(def, sagaId, input);
+    executeAdmitted(() -> requireVersionedDefinition(id), sagaId, input);
   }
 
   // ---------------------------------------------------------------------------
@@ -184,8 +374,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(sagaName, "sagaName must not be null");
     Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
-    SagaDefinition def = requireLatestDefinition(sagaName);
-    return startAsyncInternal(def, null, input, null).getSagaId();
+    return startAsyncInternal(() -> requireLatestDefinition(sagaName), null, input, null)
+        .getSagaId();
   }
 
   @Override
@@ -194,8 +384,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(input, "input must not be null");
     Objects.requireNonNull(callback, "callback must not be null");
     ensureOpen();
-    SagaDefinition def = requireLatestDefinition(sagaName);
-    return startAsyncInternal(def, null, input, callback).getSagaId();
+    return startAsyncInternal(() -> requireLatestDefinition(sagaName), null, input, callback)
+        .getSagaId();
   }
 
   @Override
@@ -204,8 +394,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(sagaName, "sagaName must not be null");
     Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
-    SagaDefinition def = requireLatestDefinition(sagaName);
-    startAsyncInternal(def, sagaId, input, null);
+    startAsyncInternal(() -> requireLatestDefinition(sagaName), sagaId, input, null);
   }
 
   @Override
@@ -216,8 +405,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(input, "input must not be null");
     Objects.requireNonNull(callback, "callback must not be null");
     ensureOpen();
-    SagaDefinition def = requireLatestDefinition(sagaName);
-    startAsyncInternal(def, sagaId, input, callback);
+    startAsyncInternal(() -> requireLatestDefinition(sagaName), sagaId, input, callback);
   }
 
   @Override
@@ -225,8 +413,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(id, "id must not be null");
     Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
-    SagaDefinition def = requireVersionedDefinition(id);
-    return startAsyncInternal(def, null, input, null).getSagaId();
+    return startAsyncInternal(() -> requireVersionedDefinition(id), null, input, null).getSagaId();
   }
 
   @Override
@@ -235,8 +422,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(input, "input must not be null");
     Objects.requireNonNull(callback, "callback must not be null");
     ensureOpen();
-    SagaDefinition def = requireVersionedDefinition(id);
-    return startAsyncInternal(def, null, input, callback).getSagaId();
+    return startAsyncInternal(() -> requireVersionedDefinition(id), null, input, callback)
+        .getSagaId();
   }
 
   @Override
@@ -245,8 +432,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(id, "id must not be null");
     Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
-    SagaDefinition def = requireVersionedDefinition(id);
-    startAsyncInternal(def, sagaId, input, null);
+    startAsyncInternal(() -> requireVersionedDefinition(id), sagaId, input, null);
   }
 
   @Override
@@ -257,8 +443,121 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(input, "input must not be null");
     Objects.requireNonNull(callback, "callback must not be null");
     ensureOpen();
-    SagaDefinition def = requireVersionedDefinition(id);
-    startAsyncInternal(def, sagaId, input, callback);
+    startAsyncInternal(() -> requireVersionedDefinition(id), sagaId, input, callback);
+  }
+
+  /**
+   * Starts a saga as {@code startAsync} does and returns the snapshot of the saga it created
+   * instead of only its ID. Not part of {@link SagaOrchestrator}: it serves the server's start
+   * endpoints, which answer with the saga's state. The start already holds that state, so returning
+   * it saves those endpoints a read of the saga back by ID on every start.
+   *
+   * <p>The snapshot is the saga as created, {@code RUNNING}; the drive is already under way, so it
+   * may have moved on by the time the caller reads it.
+   *
+   * <p><b>For the process hosting the engine, not for applications.</b> Like this class's other
+   * methods outside {@link SagaOrchestrator}, such as {@link #completeStepAsync} and {@link
+   * #adminService(OperatorContext, long)}, it serves the server that embeds the engine. An
+   * application should program to {@link SagaOrchestrator}, which the client SDK implements too;
+   * code written against this method runs only embedded.
+   *
+   * @param sagaId the caller-supplied saga ID, or {@code null} to generate one
+   * @param sagaName the definition name
+   * @param version the exact definition version, or {@code null} for the latest
+   * @param input the saga input
+   * @param callback notified of the outcome as {@code startAsync}'s callback is, or {@code null}
+   * @return the created saga's snapshot
+   */
+  public SagaStateSnapshot startAsyncReturningSnapshot(
+      @Nullable String sagaId,
+      String sagaName,
+      @Nullable String version,
+      Map<String, Object> input,
+      @Nullable SagaCallback callback) {
+    Objects.requireNonNull(sagaName, "sagaName must not be null");
+    Objects.requireNonNull(input, "input must not be null");
+    ensureOpen();
+    Supplier<SagaDefinition> definition =
+        version == null
+            ? () -> requireLatestDefinition(sagaName)
+            : () -> requireVersionedDefinition(new SagaDefinitionId(sagaName, version));
+    return startAsyncInternal(definition, sagaId, input, callback);
+  }
+
+  /**
+   * Takes a permit for a drive about to start, or refuses the start.
+   *
+   * <p>Called before the definition is resolved, and that ordering is the deliberate part.
+   * Resolving a saga by name always reads the store — the registry never caches that lookup, so it
+   * cannot serve a stale version — so resolving first would make every refusal cost a store
+   * transaction, and refusals arrive in storms precisely when the store is the thing under strain.
+   * The same reasoning that keeps a log line off this path keeps a query off it.
+   *
+   * <p>What that costs, stated plainly: at a full cap a start naming a saga that does not exist is
+   * refused before anyone discovers the name is wrong, so it reports overload rather than
+   * not-found. The caller learns of the typo when capacity returns. That is the same trade already
+   * accepted for an oversized payload, and a mistyped saga name is a development-time mistake
+   * rather than a production one.
+   *
+   * <p>Input validation runs in the refusal branch below, because it is a walk of a map the engine
+   * owns and costs nothing to repeat, so a request carrying a null is still told so rather than to
+   * try again. The saga ID is <b>not</b> checked here: its grammar belongs to the store, and
+   * reaching for it early meant a method on the store interface that would outlive its one caller.
+   * So a caller-supplied ID that the store could never accept is refused as overload at a full cap
+   * and reports its real error once capacity returns — the same shape as the unknown-name and
+   * oversized-payload cases above. And the refusal still precedes anything being persisted, which
+   * is what makes the advice to retry true.
+   *
+   * @return the lease to release when the drive ends, or {@code null} when no cap is configured
+   * @throws SagaOverloadedException when the cap is full and the request is otherwise acceptable
+   */
+  private AdmissionController.@Nullable PermitLease admit(Map<String, Object> input) {
+    AdmissionController controller = admissionController;
+    if (controller == null) {
+      return null;
+    }
+    AdmissionController.PermitLease lease = controller.acquire();
+    if (lease == null) {
+      // Only now, on the one path where the answer would otherwise be wrong. A request that was
+      // malformed on arrival must hear that rather than "busy, try again", which sends it round a
+      // loop with no exit — but the engine already makes both checks authoritatively on the way to
+      // creating a saga, so paying for them on every admitted start, and on every start at all when
+      // no cap is configured, would buy nothing.
+      try {
+        ExecutionContext.validateInput(input);
+      } catch (IllegalArgumentException e) {
+        // Typed, so the rejection is attributed to the caller rather than to the server. A bare
+        // IllegalArgumentException is a server fault to the wire mappers and takes the catch-all's
+        // 500, which would answer the same malformed request 400 below the cap and 500 at it.
+        // ExecutionContext authors the wording and it names the offending type.
+        throw new SagaIllegalArgumentException(
+            e.getMessage() == null ? e.toString() : e.getMessage(), e);
+      }
+      throw new SagaOverloadedException();
+    }
+    return lease;
+  }
+
+  /** Returns a permit, tolerating the no-cap case so both seams keep one shape. */
+  private static void release(AdmissionController.@Nullable PermitLease lease) {
+    if (lease != null) {
+      lease.release();
+    }
+  }
+
+  /**
+   * Shared synchronous-start path: the drive holds a permit for exactly as long as it occupies this
+   * thread. A saga that parks releases here too — {@code execute} returns when the saga stops
+   * progressing, and a saga waiting on an outside system is not occupying the engine.
+   */
+  private String executeAdmitted(
+      Supplier<SagaDefinition> definition, @Nullable String sagaId, Map<String, Object> input) {
+    AdmissionController.PermitLease lease = admit(input);
+    try {
+      return engine.execute(definition.get(), sagaId, input);
+    } finally {
+      release(lease);
+    }
   }
 
   /**
@@ -266,68 +565,198 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * process crashes before the virtual thread starts), then submits execution to a virtual thread.
    */
   private SagaStateSnapshot startAsyncInternal(
-      SagaDefinition def,
+      Supplier<SagaDefinition> definition,
       @Nullable String sagaId,
       Map<String, Object> input,
       @Nullable SagaCallback callback) {
-    // Defensive copy: the async thread reads this map after we return to the caller, so a caller
-    // that mutates its map post-return would otherwise race the read (CME or a torn copy).
-    Map<String, Object> copiedInput = new HashMap<>(input);
+    // Admitted before the copy: a refused start should pay for nothing it does not need, and the
+    // copy is the first thing here that costs anything per request.
+    AdmissionController.PermitLease lease = admit(input);
+    SagaStateSnapshot saga;
+    Map<String, Object> copiedInput;
+    SagaDefinition def;
+    try {
+      def = definition.get();
 
-    // Persist synchronously — saga is recoverable from this point
-    SagaStateSnapshot saga = engine.createSaga(def, sagaId, copiedInput);
+      // Defensive copy: the async thread reads this map after we return to the caller, so a caller
+      // that mutates its map post-return would otherwise race the read (CME or a torn copy).
+      copiedInput = new HashMap<>(input);
 
-    // Submit execution to a virtual thread. The returned Future is intentionally unused:
-    // saga state is persisted, so recovery handles failures. Storing the future would require
-    // managing its lifecycle (fire-and-forget pattern).
-    submitAsync(def, saga, copiedInput, callback);
+      // Persist synchronously — saga is recoverable from this point
+      saga = engine.createSaga(def, sagaId, copiedInput);
+    } catch (Throwable t) {
+      // Nothing was handed to the executor, so this thread still owns the permit.
+      release(lease);
+      throw t;
+    }
+
+    // Dispatch execution to a virtual thread; fire-and-forget, saga state is persisted so
+    // recovery handles failures. The lease goes with it: from here the drive owns it.
+    submitAsync(def, saga, copiedInput, callback, lease);
 
     return saga;
   }
 
-  @SuppressWarnings("FutureReturnValueIgnored") // fire-and-forget; recovery handles failures
   private void submitAsync(
       SagaDefinition def,
       SagaStateSnapshot saga,
       Map<String, Object> input,
-      @Nullable SagaCallback callback) {
+      @Nullable SagaCallback callback,
+      AdmissionController.@Nullable PermitLease lease) {
     try {
-      asyncExecutor.submit(
+      // execute() (not submit()) because the result is ignored: submit() would return a Future we
+      // drop, which both trips Error Prone and silently swallows failures. The inner catches handle
+      // failures instead, logging any Throwable (incl. Error); the saga is persisted, so recovery
+      // is the backstop.
+      asyncExecutor.execute(
           () -> {
+            // What execution decided, or null if it threw before deciding anything. Recorded
+            // rather than branched on, because the dispatch below must stay in the finally: a saga
+            // that reached a terminal state and then threw still owes its caller that callback.
+            SagaStateSnapshot executed = null;
             try {
-              engine.executeSaga(def, saga, input);
-            } catch (Exception e) {
+              executed = engine.executeSaga(def, saga, input);
+            } catch (Throwable t) {
               // Saga state is persisted — recovery will pick it up
-              logger.error("Async saga {} failed unexpectedly", saga.getSagaId(), e);
+              logger.error("Async saga {} failed unexpectedly", saga.getSagaId(), t);
             } finally {
+              // Released before the callback runs, and that order is load-bearing: a client told
+              // its saga completed or parked may start the next one immediately, and would be
+              // refused by a permit this drive has finished with. It also means a callback that
+              // throws or blocks forever cannot hold capacity hostage.
+              release(lease);
               try {
-                dispatchCallback(saga.getSagaId(), callback);
-              } catch (Exception e) {
-                logger.error("Failed to dispatch callback for saga {}", saga.getSagaId(), e);
+                dispatchOutcome(saga.getSagaId(), callback, executed);
+              } catch (Throwable t) {
+                logger.error("Failed to dispatch outcome for saga {}", saga.getSagaId(), t);
               }
             }
           });
     } catch (RejectedExecutionException e) {
-      // Race between close() and submit — saga is already persisted, recovery will handle it
+      // The task will never run, so nothing else will return this permit.
+      release(lease);
+      // Race between close() and execute() — saga is already persisted, recovery will handle it
       logger.warn(
           "Async executor rejected saga {} (shutting down); recovery will handle it",
           saga.getSagaId(),
           e);
+    } catch (Throwable t) {
+      // An executor that fails some other way owes the same accounting. A pathological one that
+      // both schedules the task and throws would release twice; the lease absorbs that, which is
+      // why it is release-once rather than a bare semaphore call.
+      release(lease);
+      throw t;
     }
   }
 
-  private void dispatchCallback(String sagaId, @Nullable SagaCallback callback) {
+  /**
+   * Reports what a drive did to everything on this process that should hear it: the {@link
+   * SettlementListener}, when something is waiting for this saga, and the caller's own {@link
+   * SagaCallback}, when the start supplied one. A resumed drive carries no callback and reaches the
+   * listener alone, which is the only way a caller waiting on a parked saga learns it settled.
+   *
+   * @param executed the state execution left the saga in, or {@code null} when it threw before
+   *     reaching one — in which case the cause is already logged and there is no outcome to report
+   */
+  private void dispatchOutcome(
+      String sagaId, @Nullable SagaCallback callback, @Nullable SagaStateSnapshot executed) {
+    // Asked once and reused: the answer decides whether this drive does any work at all, and a
+    // second call could disagree with the first if the waiter deregistered in between. Guarded for
+    // the same reason as the notification below — a listener that throws here must not cost the
+    // caller its callback, which would leave it waiting out its whole bound for an answer already
+    // in hand. Treated as "nobody is waiting", which is the safe reading: the caller still gets
+    // its callback, and anything that was waiting falls back to its own poll.
+    boolean watched;
+    try {
+      watched = settlementListener.isWatching(sagaId);
+    } catch (Throwable t) {
+      logger.error("Settlement listener failed for saga {}", sagaId, t);
+      watched = false;
+    }
+    if (callback == null && !watched) {
+      return;
+    }
+    // Execution threw before reaching a verdict, so there is no local answer. Fall back to the
+    // store — it may well have completed the saga and failed afterwards, and that caller is still
+    // owed its terminal callback. This read carries the staleness the verdict exists to avoid, but
+    // it is the only source available, and it is confined to the exceptional path. Gating it on
+    // `watched` above keeps it off the path of a start nobody is waiting for.
+    boolean aborted = executed == null;
+    SagaStateSnapshot result;
+    if (executed == null) {
+      result = store.getStateSnapshot(sagaId).orElseThrow(() -> new SagaNotFoundException(sagaId));
+    } else {
+      result = executed;
+    }
+    // The listener first: it is a request holder with a client attached, where the callback is
+    // application code that may be slow. Guarded on its own so a misbehaving listener cannot cost
+    // the callback its dispatch, and vice versa. Terminal only — a parked saga is still live and a
+    // waiter has nothing to act on until it settles.
+    if (watched && result.getStatus().isTerminal()) {
+      try {
+        settlementListener.onSagaSettled(result);
+      } catch (Throwable t) {
+        logger.error("Settlement listener failed for saga {}", sagaId, t);
+      }
+    }
+    // A resumed drive carries no callback; notifying the listener is all it owes.
+    //
+    // Recovery drives are deliberately not wired to this. They run in SagaRecoveryManager, which
+    // would have to carry the listener to its three drive sites, and recovery is slow to start
+    // relative to a synchronous wait: staleness defaults to 60s, which is also the default wait
+    // bound, so a waiter has usually answered from its own read before recovery claims anything.
+    //
+    // A default, not an invariant. A parked deadline comes from the step's own timeout, so it can
+    // be short, and raising sync.max_wait_millis well above the staleness threshold leaves a waiter
+    // present while recovery settles the saga. Both cases still answer correctly, from the caller's
+    // own poll or its read at the bound, the same fallback that covers a saga resumed on another
+    // replica. See todos/096.
     if (callback == null) {
       return;
     }
-    SagaStateSnapshot result =
-        store.getStateSnapshot(sagaId).orElseThrow(() -> new SagaNotFoundException(sagaId));
+    // Every status is listed and there is no default, deliberately: a new SagaStatus must not
+    // silently inherit another one's callback. Without a default arm, Error Prone's
+    // MissingCasesInEnumSwitch — escalated to an error in the java conventions — fails the build
+    // when one is added, forcing the choice here.
     switch (result.getStatus()) {
       case COMPLETED -> callback.onCompleted(result);
       case COMPENSATED -> callback.onCompensated(result);
       case ESCALATED -> callback.onEscalated(result);
-      default ->
-          logger.warn("Saga {} ended in non-terminal status: {}", sagaId, result.getStatus());
+      // Parked on an async step, waiting for that step's callback or its deadline. Reported as
+      // information for embedded callers that track saga lifecycle; it is deliberately not a
+      // release signal for a bounded synchronous start, which keeps waiting because the saga may
+      // still finish inside its bound.
+      case WAITING -> callback.onParked(result);
+      // Execution returned without the saga resting anywhere. Since this is execution's own
+      // verdict rather than a later read of shared state, a resume landing elsewhere can no longer
+      // masquerade as either case below — which is what makes the error worth acting on.
+      //
+      // This arm reports nothing to the caller, only to the log, so a front end waiting on this
+      // saga is told neither that it settled nor that it parked. Its wait therefore runs to its
+      // bound and answers from the read there. That is the one path on which a bounded wait gets
+      // no push at all; see todos/096 for why polling before the park would not currently help.
+      case RUNNING, COMPENSATING -> {
+        if (aborted) {
+          logger.warn(
+              "Saga {} was left in {} by a failed execution; recovery will reclaim it",
+              sagaId,
+              result.getStatus());
+        } else if (engine.isShuttingDown()) {
+          // The designed hand-off: under WAIT_CURRENT_STEP the engine finishes the running step,
+          // marks the saga for recovery, and returns with it still RUNNING. Debug rather than warn,
+          // because a rolling restart produces one per in-flight saga and none is actionable.
+          logger.debug(
+              "Saga {} left in {} by shutdown; recovery will reclaim it",
+              sagaId,
+              result.getStatus());
+        } else {
+          logger.error(
+              "Saga {} finished executing but is still {} — this is an engine invariant violation,"
+                  + " please report it; recovery will reclaim the saga",
+              sagaId,
+              result.getStatus());
+        }
+      }
     }
   }
 
@@ -352,6 +781,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * attributed to a fixed embedded principal, and single-saga drives run to completion on the
    * calling thread. A server that authenticates its callers and must not block a request thread
    * indefinitely passes its own operator context and drive deadline to that method instead.
+   *
+   * @return the admin service for embedded use
    */
   public SagaAdminService adminService() {
     return adminService(() -> EMBEDDED_OPERATOR, 0L);
@@ -360,7 +791,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   @Override
   public SagaDetail getSagaDetail(String sagaId) {
     // An application read of its own saga's state and timeline — no operator, no drive.
-    return SagaDetailReader.read(store, sagaId);
+    return SagaDetailReader.read(store, sagaId, maxTimelineEvents);
   }
 
   /**
@@ -391,7 +822,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   /**
    * Resumes a parked ({@code WAITING}) saga when the async callback for its parked step arrives:
    * atomically records {@code STEP_COMPLETED} (carrying {@code output}), transitions {@code WAITING
-   * -> RUNNING}, and deletes the {@code saga_parked} row. Returns as soon as the step is durably
+   * -> RUNNING}, and takes the saga out of the parked sweep. Returns as soon as the step is durably
    * resumed — the {@code RUNNING} snapshot, not the saga's final state — and runs the forward tail
    * on the async executor rather than the caller's thread.
    *
@@ -405,44 +836,139 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * @param stepName the step the callback completes (must be the currently parked step)
    * @param output the step's output, merged into the saga context for downstream steps
    * @return the {@code RUNNING} snapshot immediately after the parked step is resumed
-   * @throws IllegalStateException if the saga is not {@code WAITING}
-   * @throws IllegalArgumentException if {@code stepName} is not the currently parked step
+   * @throws SagaStepNotParkedException if the step has not parked yet; retryable, since the park is
+   *     about to be recorded
+   * @throws IllegalStateException if the step is already completed or the saga has moved on, which
+   *     the callback endpoint answers as an idempotent duplicate
+   * @throws SagaIllegalArgumentException if {@code stepName} is not the currently parked step, or
+   *     if {@code output} holds a value a saga context cannot carry. Both are thrown before
+   *     anything is recorded, so the step stays parked and the callback can be retried once
+   *     corrected. Note this does <em>not</em> extend {@link IllegalArgumentException}, so a caller
+   *     filtering by that type will not see it
    * @throws SagaConcurrentModificationException if a concurrent deadline-timeout sweep resolves the
    *     parked step first (the callback lost the race)
    */
   public SagaStateSnapshot completeStepAsync(
       String sagaId, String stepName, Map<String, Object> output) {
     ResumedStep resumed = resumeParked(sagaId, stepName, output);
-    try {
-      // execute() (not submit()) because the result is ignored: submit() would return a Future we
-      // drop, which both trips SpotBugs and silently swallows failures. The inner catch handles
-      // failures instead, logging any Throwable (incl. Error); the saga is persisted as RUNNING, so
-      // recovery is the backstop.
-      asyncExecutor.execute(
-          () -> {
-            try {
-              engine.resumeFrom(resumed.def(), resumed.context(), resumed.stepIndex() + 1);
-            } catch (Throwable t) {
-              logger.error("Async completion drive for saga {} failed unexpectedly", sagaId, t);
-            }
-          });
-    } catch (RejectedExecutionException e) {
-      // Race between close() and execute() — the step is resumed (RUNNING); recovery will drive it.
-      logger.warn(
-          "Async executor rejected completion drive for saga {} (shutting down); "
-              + "recovery will handle it",
-          sagaId,
-          e);
-    }
+    // The resume carries no SagaCallback — the one from the original start died at the park — so
+    // this reaches the settlement listener alone.
+    driveDetached(
+        sagaId,
+        "completion",
+        () -> {
+          engine.resumeFrom(resumed.def(), resumed.context(), resumed.stepIndex() + 1);
+          return resumed.context().getCurrentState();
+        });
     return resumed.running();
   }
 
   /**
-   * Phase 1 of completing a parked step: validates the saga is {@code WAITING} and {@code stepName}
-   * is the parked step, atomically records {@code STEP_COMPLETED} + {@code WAITING -> RUNNING} and
-   * deletes the {@code saga_parked} row, then rebuilds the execution context. Kept separate from
-   * the forward drive so {@link #completeStepAsync} can return once this synchronous phase commits
-   * and run the drive on the async executor. Returns everything the forward drive needs.
+   * Settles a parked ({@code WAITING}) step that its participant reports as failed, through its
+   * failure callback, rather than leaving it to wait out its deadline. The same rules settle it as
+   * when recovery finds the step past its deadline. A retryable failure re-issues the step while
+   * its retry attempts and the grace period allow; past them, and for a failure that is not
+   * retryable, the step is given up. The saga then compensates if the step is at or before the
+   * pivot, or is escalated if it is after it.
+   *
+   * <p>Like {@link #completeStepAsync}, this returns once the transition is durable, and runs the
+   * re-issued step or the compensation on the async executor. The participant's message, if any, is
+   * recorded on the event for what happened next, the re-issue or the step's failure, flattened to
+   * one line and cut to {@value #MAX_REPORTED_ERROR_CHARS} characters.
+   *
+   * @param sagaId the parked saga
+   * @param stepName the step the participant reports on (must be the currently parked step)
+   * @param error the participant's account of the failure, or {@code null} for none
+   * @param retryable whether the participant asks for the step to be retried
+   * @return the saga's state once the transition commits: {@code RUNNING} when the step is
+   *     re-issued, {@code COMPENSATING} or {@code ESCALATED} when it is given up
+   * @throws SagaStepNotParkedException if the step has not parked yet, or the saga's row lags its
+   *     log; retryable, since the park is about to be recorded
+   * @throws IllegalStateException if the step is already settled or the saga has moved on, which
+   *     the callback endpoint answers as an idempotent duplicate
+   * @throws SagaIllegalArgumentException if {@code stepName} is not the currently parked step
+   * @throws SagaConcurrentModificationException if a concurrent callback or deadline sweep settles
+   *     the parked step first
+   */
+  public SagaStateSnapshot failStepAsync(
+      String sagaId, String stepName, @Nullable String error, boolean retryable) {
+    Objects.requireNonNull(sagaId, "sagaId must not be null");
+    Objects.requireNonNull(stepName, "stepName must not be null");
+    ensureOpen();
+
+    List<SagaEvent> events = store.getEvents(sagaId);
+    SagaStateSnapshot saga = parkedSnapshot(sagaId, stepName, events);
+    int stepIndex = parkedStepIndex(events, sagaId, stepName);
+    SagaDefinition def = resolveDefinition(saga);
+    ParkedStepResolver.Resolution resolution =
+        recoveryManager
+            .parkedStepResolver()
+            .resolve(saga, events, stepIndex, stepName, def, retryable, reportedCause(error));
+    logger.info(
+        "Participant reported step '{}' of saga {} failed ({}); saga is now {}",
+        stepName,
+        sagaId,
+        retryable ? "retryable" : "not retryable",
+        resolution.snapshot().getStatus());
+
+    driveDetached(sagaId, "failure-callback", resolution.drive());
+    return resolution.snapshot();
+  }
+
+  /**
+   * Runs a parked saga's continuation on the async executor, so a callback route can answer its
+   * participant once the transition is durable rather than after the rest of the saga. The verdict
+   * is recorded rather than branched on, and the outcome dispatched in the finally, as {@code
+   * submitAsync} does, so a drive that settled the saga and then threw still notifies. {@code
+   * execute()} rather than {@code submit()}: the result is unused, and a dropped Future would
+   * swallow failures. If the executor is shutting down, the transition is still committed and
+   * recovery drives the saga.
+   */
+  private void driveDetached(String sagaId, String label, Supplier<SagaStateSnapshot> drive) {
+    try {
+      asyncExecutor.execute(
+          () -> {
+            SagaStateSnapshot executed = null;
+            try {
+              executed = drive.get();
+            } catch (Throwable t) {
+              logger.error("Async {} drive for saga {} failed unexpectedly", label, sagaId, t);
+            } finally {
+              try {
+                dispatchOutcome(sagaId, null, executed);
+              } catch (Throwable t) {
+                logger.error("Failed to dispatch outcome for saga {}", sagaId, t);
+              }
+            }
+          });
+    } catch (RejectedExecutionException e) {
+      logger.warn(
+          "Async executor rejected {} drive for saga {} (shutting down); recovery will handle it",
+          label,
+          sagaId,
+          e);
+    }
+  }
+
+  /**
+   * What the failure event records for a participant's report. The text comes from outside and is
+   * logged when the step is escalated, so it is flattened to one line first, as an operator's
+   * reason is.
+   */
+  private static String reportedCause(@Nullable String error) {
+    String trimmed = error == null ? "" : TextGuards.oneLine(error).strip();
+    return trimmed.isEmpty()
+        ? "participant reported failure"
+        : "participant reported failure: " + TextGuards.cut(trimmed, MAX_REPORTED_ERROR_CHARS);
+  }
+
+  /**
+   * Phase 1 of completing a parked step: validates the saga is {@code WAITING}, that {@code
+   * stepName} is the parked step and that {@code output} is a value a context can hold, atomically
+   * records {@code STEP_COMPLETED} + {@code WAITING -> RUNNING} and takes the saga out of the
+   * parked sweep, then rebuilds the execution context. Kept separate from the forward drive so
+   * {@link #completeStepAsync} can return once this synchronous phase commits and run the drive on
+   * the async executor. Returns everything the forward drive needs.
    */
   private ResumedStep resumeParked(String sagaId, String stepName, Map<String, Object> output) {
     Objects.requireNonNull(sagaId, "sagaId must not be null");
@@ -450,26 +976,40 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(output, "output must not be null");
     ensureOpen();
 
-    SagaStateSnapshot saga = getStateSnapshot(sagaId);
-    if (saga.getStatus() != SagaStatus.WAITING) {
-      throw new IllegalStateException(
-          "Cannot complete step for saga " + sagaId + " in status " + saga.getStatus());
+    List<SagaEvent> events = store.getEvents(sagaId);
+    SagaStateSnapshot saga = parkedSnapshot(sagaId, stepName, events);
+    int stepIndex = parkedStepIndex(events, sagaId, stepName);
+
+    // Before the commit, for the same reason SagaEngine.createSaga validates before persisting: the
+    // replay below folds this map into the context and rejects what a context cannot hold, and by
+    // then STEP_COMPLETED is durable. The caller would get a 400 for a step the store already
+    // records as completed, on a saga left RUNNING with no forward drive, and recovery would replay
+    // the same rejection. Serialization does not reject these values, so this is the only guard.
+    // Ahead of the definition lookup too, so the caller's own body is judged before any work that
+    // can fail for reasons that are not theirs.
+    try {
+      ExecutionContext.validateInput(output);
+    } catch (IllegalArgumentException e) {
+      // The output arrived on the callback request, so the rejection is attributable to its sender.
+      // ExecutionContext authors the wording and it names the offending type.
+      logger.warn(
+          "Rejecting callback output for saga {} step '{}': {}", sagaId, stepName, e.getMessage());
+      throw new SagaIllegalArgumentException(
+          e.getMessage() == null ? e.toString() : e.getMessage(), e);
     }
 
-    List<SagaEvent> events = store.getEvents(sagaId);
-    int stepIndex = parkedStepIndex(events, sagaId, stepName);
     SagaDefinition def = resolveDefinition(saga);
 
-    // Atomic: STEP_COMPLETED + WAITING -> RUNNING + delete the saga_parked row. The optimistic
-    // WAITING-CK check makes this and a concurrent deadline-timeout sweep mutually exclusive.
+    // Atomic: STEP_COMPLETED + WAITING -> RUNNING + the sweep row out of the waiting slice. Both
+    // read the parked saga's sweep row, so this and a concurrent deadline-timeout sweep conflict.
     String payload = EventPayloadSerializer.serialize(output);
     StepEvent completedEvent = StepEvent.completed(stepIndex, stepName, payload);
     SagaStateSnapshot running = store.resumeParkedStep(saga, events.size(), completedEvent);
 
     // Defense in depth: a successful resume must land in RUNNING. resumeParkedStep already throws
-    // SagaConcurrentModificationException if a concurrent timeout sweep won the WAITING CK, so this
-    // guards only against a store contract violation — never drive forward on a non-RUNNING
-    // snapshot.
+    // SagaConcurrentModificationException if a concurrent timeout sweep moved the parked sweep row
+    // first, so this guards only against a store contract violation — never drive forward on a
+    // non-RUNNING snapshot.
     if (running.getStatus() != SagaStatus.RUNNING) {
       throw new IllegalStateException(
           "resumeParkedStep for saga "
@@ -479,13 +1019,63 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     }
 
     // Replay to fold the callback output into context. The resume appended completedEvent at
-    // events.size() and nothing else, and its WAITING-CK check proves the log was untouched since
-    // we read `events` (a parked saga's log grows only through a CK-changing transition). So we
-    // append locally instead of re-reading (replayEvents ignores the event timestamp).
+    // events.size() and nothing else, and its check on the parked state proves the log was
+    // untouched since we read `events` (a parked saga's log grows only through status changes).
+    // So we append locally instead of re-reading (replayEvents ignores the event timestamp).
     List<SagaEvent> updatedEvents = new ArrayList<>(events);
     updatedEvents.add(completedEvent);
     ExecutionContext context = engine.replayEvents(running, updatedEvents);
     return new ResumedStep(running, def, context, stepIndex);
+  }
+
+  /**
+   * The {@code WAITING} snapshot a callback on {@code stepName} completes. The saga's state is read
+   * from its own event partition, so it is current on every backend; the step's events then decide
+   * between the two cases the callback contract keeps apart when the saga is not parked:
+   *
+   * <ul>
+   *   <li>The step has not been parked yet: the engine parks only after the participant accepted
+   *       the call, so a participant that calls back at once can arrive first. That is {@link
+   *       SagaStepNotParkedException}, a retryable refusal, because a callback acked now would be
+   *       lost and the saga would wait on it until its timeout, or forever on an unbounded park.
+   *   <li>The step is already completed, or the saga moved on: {@link IllegalStateException}, which
+   *       the callback endpoint answers as an idempotent duplicate.
+   * </ul>
+   */
+  private SagaStateSnapshot parkedSnapshot(String sagaId, String stepName, List<SagaEvent> events) {
+    SagaStateSnapshot saga = getStateSnapshot(sagaId);
+    SagaEvent newest = events.isEmpty() ? null : events.get(events.size() - 1);
+    if (saga.getStatus() == SagaStatus.WAITING
+        && newest != null
+        && newest.getEventType() == EventType.STEP_PENDING) {
+      return saga;
+    }
+    // The events were read before the state, so a park can land between the two reads: the state
+    // says WAITING while the events end before the park. Retrying finds both agreeing.
+    boolean stillAhead =
+        saga.getStatus() == SagaStatus.RUNNING || saga.getStatus() == SagaStatus.WAITING;
+    if (stillAhead && !completionStands(events, stepName)) {
+      throw new SagaStepNotParkedException(sagaId, stepName);
+    }
+    throw new IllegalStateException(
+        "Cannot settle step for saga " + sagaId + " in status " + saga.getStatus());
+  }
+
+  /**
+   * Whether {@code stepName}'s latest event is its completion. Only a completion settles a step
+   * while the saga is {@code RUNNING} or {@code WAITING}: a failure there is about to be retried
+   * forward, or to move the saga to {@code COMPENSATING}, so a callback that meets it is refused
+   * and retried rather than acked and lost. Any later event on the step, a {@code STEP_PENDING} or
+   * {@code STEP_REISSUING} above all, reopens it.
+   */
+  private static boolean completionStands(List<SagaEvent> events, String stepName) {
+    boolean completed = false;
+    for (SagaEvent event : events) {
+      if (event instanceof StepEvent step && step.getStepName().equals(stepName)) {
+        completed = event.getEventType() == EventType.STEP_COMPLETED;
+      }
+    }
+    return completed;
   }
 
   /** Phase-1 result of completing a parked step: the resumed saga and where to drive it from. */
@@ -504,16 +1094,31 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       }
     }
     if (parked == null) {
-      throw new IllegalStateException("Saga " + sagaId + " has no parked step to complete");
+      throw new IllegalStateException("Saga " + sagaId + " has no parked step to settle");
     }
     if (!parked.getStepName().equals(stepName)) {
-      throw new IllegalArgumentException(
-          "Callback step '"
-              + stepName
-              + "' does not match the parked step '"
-              + parked.getStepName()
-              + "' for saga "
-              + sagaId);
+      // Caller input rather than a server fault, so it carries INVALID_ARGUMENT: the step name
+      // comes from the callback URL, and a participant replaying a token issued for an earlier
+      // step of the same saga arrives here with a signature that verifies.
+      //
+      // That replay is also why the parked step's name goes to the log and not into the message.
+      // The holder of one step's callback URL can call it as often as it likes; the route is not
+      // rate limited and the token has no TTL unless one is configured. Naming the step the saga
+      // is parked on would answer each of those calls with the saga's current position, which is
+      // how a participant scoped to one step maps out the rest. The 200 on the duplicate-callback
+      // path withholds step names for the same reason, and reading them is otherwise an admin
+      // operation. The caller still learns which of its own values was refused.
+      //
+      // Logged because a typed rejection is answered without one, and a replayed or leaked
+      // callback URL would otherwise leave no server-side trace at all. WARN prints at the
+      // production logging default.
+      logger.warn(
+          "Callback for saga {} names step '{}' but the parked step is '{}'",
+          sagaId,
+          stepName,
+          parked.getStepName());
+      throw new SagaIllegalArgumentException(
+          "Reported step '" + stepName + "' is not the parked step for saga " + sagaId);
     }
     return parked.getStepIndex();
   }
@@ -522,6 +1127,21 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   // Recovery
   // ---------------------------------------------------------------------------
 
+  /**
+   * Runs one recovery pass now (both sweeps: stale sagas and overdue parked sagas), returning when
+   * the pass has finished its work.
+   *
+   * <p>Passes never overlap: if a scheduled pass (see {@link #startBackgroundTasks()}) is already
+   * in flight, this call blocks until that pass completes and then runs its own. The wait honors
+   * thread interruption — an interrupted caller returns without having run a pass, with the
+   * interrupt flag set. A pass interrupted mid-run cancels its in-flight recovery tasks and drains
+   * their results before returning (their unknown outcomes are charged as errors), so no task
+   * outlives its pass.
+   *
+   * <p>A pass continues a budget-stopped bucket revolution rather than restarting it, so a saga
+   * just marked via {@link SagaStore#markForRecovery} is not guaranteed to be reached by the next
+   * single call — only within one revolution's worth of passes.
+   */
   public void recover() {
     ensureOpen();
     recoveryManager.recover();
@@ -531,6 +1151,15 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   // Background Tasks
   // ---------------------------------------------------------------------------
 
+  /**
+   * Starts the periodic recovery and retention passes on this process, scheduled per the {@link
+   * RecoveryConfig} and {@link RetentionConfig} the builder was given. Without this call the
+   * orchestrator runs sagas but neither recovers abandoned ones on its own nor purges finished
+   * ones; {@link #recover()} still runs a single recovery pass on demand. Call it once: nothing
+   * guards against a second call, which schedules a second set of passes alongside the first.
+   *
+   * @throws IllegalStateException if the orchestrator is closed
+   */
   public void startBackgroundTasks() {
     ensureOpen();
     recoveryManager.start();
@@ -543,14 +1172,30 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
 
   @Override
   public void close() {
+    close(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(shutdownTimeoutMillis));
+  }
+
+  /**
+   * Closes against a deadline the caller owns. The background managers, the engine's saga drain and
+   * the async executor each take what remains of it rather than starting a clock of their own, so a
+   * server can bound its whole shutdown by one budget; the no-arg {@link #close()} spends the
+   * configured shutdown timeout, which is what an embedded caller expects. The engine is told it is
+   * shutting down before the managers stop, so a recovery drive running through it stops at its
+   * next step boundary instead of spending the budget the saga drain is owed. Past the deadline the
+   * engine still marks every saga it could not finish for recovery, and the store is closed last,
+   * so a spent budget costs reclaim latency rather than integrity.
+   *
+   * @param deadline the absolute {@link System#nanoTime()} deadline for the drain
+   */
+  public void close(long deadline) {
     closed = true;
-    long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(shutdownTimeoutMillis);
+    engine.beginShutdown();
 
     retentionManager.stop(deadline);
     recoveryManager.stop(deadline);
 
     asyncExecutor.shutdown();
-    engine.shutdown();
+    engine.shutdown(Math.max(0L, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())));
 
     long remainingNanos = deadline - System.nanoTime();
     try {
@@ -586,24 +1231,48 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   private SagaDefinition requireLatestDefinition(String sagaName) {
     SagaDefinition def = definitionRegistry.resolve(sagaName);
     if (def == null) {
-      throw new SagaDefinitionNotFoundException(sagaName);
+      throw SagaDefinitionNotFoundException.byName(sagaName);
     }
+    requireServed(sagaName);
     return def;
   }
 
   private SagaDefinition requireVersionedDefinition(SagaDefinitionId id) {
     SagaDefinition def = definitionRegistry.resolve(id.name(), id.version());
     if (def == null) {
-      throw new SagaDefinitionNotFoundException(id);
+      throw SagaDefinitionNotFoundException.byId(id);
     }
+    // Whether a saga is served is a property of the NAME, so pinning a version is refused on the
+    // same basis as a name-only start rather than being a way around it.
+    requireServed(id.name());
     return def;
+  }
+
+  /**
+   * Refuses a start of a saga this deployment does not serve.
+   *
+   * <p>Checked after the definition resolves, so a name nobody ever registered stays a not-found
+   * rather than becoming this: the two are different problems with different fixes. Resolving first
+   * also means the check costs nothing — the served set is an in-memory snapshot and the store read
+   * had to happen anyway.
+   *
+   * <p>Only new starts come through here. In-flight sagas resume through {@link
+   * #resolveDefinition}, so ceasing to serve a saga stops new work without stranding work already
+   * running, or the admin operations that drive it to a conclusion.
+   */
+  private void requireServed(String sagaName) {
+    Set<String> served = servedDefinitions;
+    if (served != null && !served.contains(sagaName)) {
+      throw SagaDefinitionNotServedException.of(sagaName);
+    }
   }
 
   private SagaDefinition resolveDefinition(SagaStateSnapshot saga) {
     SagaDefinition def =
         definitionRegistry.resolve(saga.getSagaName(), saga.getDefinitionVersion());
     if (def == null) {
-      throw new SagaDefinitionNotFoundException(saga.getSagaName(), saga.getDefinitionVersion());
+      throw SagaDefinitionNotFoundException.byNameAndVersion(
+          saga.getSagaName(), saga.getDefinitionVersion());
     }
     return def;
   }
@@ -642,10 +1311,19 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   public static final class Builder {
 
     private @Nullable SagaStoreFactory storeFactory;
+    // Mirrors the store's saga-ID discipline: the owner id lands in claim events and log lines, so
+    // it gets the same character set and length bound.
+    private static final java.util.regex.Pattern OWNER_ID_PATTERN =
+        java.util.regex.Pattern.compile("[a-zA-Z0-9._-]{1,128}");
+
     private String ownerId = java.util.UUID.randomUUID().toString();
     private ShutdownMode shutdownMode = DEFAULT_SHUTDOWN_MODE;
     private long shutdownTimeoutMillis = DEFAULT_SHUTDOWN_TIMEOUT_MILLIS;
+    private long defaultSagaTimeoutMillis = DEFAULT_SAGA_TIMEOUT_MILLIS;
+    private int maxTimelineEvents = DEFAULT_MAX_TIMELINE_EVENTS;
+    private int maxConcurrentSagaStarts = DEFAULT_MAX_CONCURRENT_SAGA_STARTS;
     private Clock clock = Clock.systemUTC();
+    private SettlementListener settlementListener = SettlementListener.NO_OP;
     private ResourceRegistry.@Nullable Builder resourceRegistryBuilder;
     private @Nullable StepResolver customStepResolver;
     private final Map<String, HttpServiceConfig> httpEndpoints = new HashMap<>();
@@ -654,6 +1332,48 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     private @Nullable CallbackUrlProvider callbackUrlProvider;
 
     private Builder() {}
+
+    /**
+     * Caps how many sagas may be starting at once; a start arriving at the cap is refused
+     * immediately with {@link SagaOverloadedException} rather than queued. Defaults to {@link
+     * #DEFAULT_MAX_CONCURRENT_SAGA_STARTS} (0, no cap).
+     *
+     * <p>A permit is held per drive, so a saga parked on an outside system holds nothing, and
+     * resumes, recovery and admin drives are never refused. The refusal happens after validation
+     * and before anything is persisted: the saga does not exist and its ID is still free.
+     *
+     * <p><b>Sizing.</b> Steady-state in-flight population is arrival rate times saga duration
+     * (Little's law), so start from the arrival rate you intend to serve and the duration you
+     * measure, add headroom for bursts, and bound the result so that worst-case saga latency stays
+     * inside the recovery staleness threshold — beyond it, recovery begins claiming sagas that are
+     * still running, which is the collapse this cap exists to prevent. Measure rather than guess:
+     * the benchmark harness reports in-flight population and worst-case latency for a given
+     * workload, and that output is the sizing method.
+     *
+     * <p><b>Size it together with the daemon's request rate limit</b> ({@code
+     * scalar.db.saga.server.max_start_requests_per_minute}), which bounds a different quantity:
+     * that limits how often one principal may ask, at the transport; this limits how much work the
+     * engine is doing for everyone. Neither substitutes for the other — a rate limit cannot see
+     * duration, so a downstream slowdown multiplies the in-flight population at an unchanged
+     * arrival rate, while a cap alone leaves one caller free to spend everyone's capacity on cheap
+     * refusals. Both are off by default. The check that connects them: aggregate admitted arrival
+     * (principals times per-principal limit) times typical duration should sit comfortably below
+     * this cap, so the rate limiter does the everyday shaping and the cap is the backstop that
+     * fires only when duration blows out. If it sits above, callers within their limits are refused
+     * routinely and "server full" stops being an exceptional signal.
+     *
+     * @param maxConcurrentSagaStarts the maximum number of starts that may be executing at once, or
+     *     0 for no cap; must not be negative
+     * @return this builder
+     */
+    public Builder maxConcurrentSagaStarts(int maxConcurrentSagaStarts) {
+      if (maxConcurrentSagaStarts < 0) {
+        throw new IllegalArgumentException(
+            "maxConcurrentSagaStarts must not be negative, got " + maxConcurrentSagaStarts);
+      }
+      this.maxConcurrentSagaStarts = maxConcurrentSagaStarts;
+      return this;
+    }
 
     /**
      * Sets the store factory. The factory's {@link SagaStoreFactory#createStore()} method is called
@@ -675,13 +1395,20 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     }
 
     /**
-     * Sets the owner ID for this engine instance. Defaults to a random UUID.
+     * Sets the owner ID for this engine instance. Defaults to a random UUID. The value is stamped
+     * on claimed saga rows and echoed in log lines, so it is validated like a saga ID: {@code
+     * [a-zA-Z0-9._-]{1,128}}.
      *
      * @param ownerId the owner ID (e.g., pod name, hostname)
      * @return this builder
+     * @throws IllegalArgumentException if the value has other characters or an invalid length
      */
     public Builder ownerId(String ownerId) {
-      this.ownerId = Objects.requireNonNull(ownerId, "ownerId must not be null");
+      Objects.requireNonNull(ownerId, "ownerId must not be null");
+      if (!OWNER_ID_PATTERN.matcher(ownerId).matches()) {
+        throw new IllegalArgumentException("ownerId must match " + OWNER_ID_PATTERN.pattern());
+      }
+      this.ownerId = ownerId;
       return this;
     }
 
@@ -709,6 +1436,51 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     }
 
     /**
+     * Sets a default saga timeout in milliseconds, applied at execution to any definition that
+     * specifies no timeout of its own ({@code timeoutMillis == 0}). The default is applied at every
+     * execution entry — start, recovery resume, and parked resume — by recomputing the deadline at
+     * each drive, so an in-flight saga's effective timeout follows the value configured at each
+     * resumption, and the stored definition never carries a baked-in copy of it. Disabling the
+     * default ({@code 0}) is one-way for parked sagas, though: a saga whose park deadline came only
+     * from this default re-parks with no deadline on its next drive, which does not merely widen
+     * its deadline but removes it from the parked-timeout sweep for good; raising the default again
+     * later cannot re-bound it, and only its callback or a forced completion moves it. Defaults to
+     * {@value #DEFAULT_SAGA_TIMEOUT_MILLIS}: definitions without a timeout run without one.
+     *
+     * @param defaultSagaTimeoutMillis the default saga timeout; {@code 0} applies none
+     * @return this builder
+     * @throws IllegalArgumentException if the value is negative
+     */
+    public Builder defaultSagaTimeoutMillis(long defaultSagaTimeoutMillis) {
+      if (defaultSagaTimeoutMillis < 0) {
+        throw new IllegalArgumentException(
+            "defaultSagaTimeoutMillis must be >= 0, got " + defaultSagaTimeoutMillis);
+      }
+      this.defaultSagaTimeoutMillis = defaultSagaTimeoutMillis;
+      return this;
+    }
+
+    /**
+     * Bounds the timeline returned by {@link SagaOrchestrator#getSagaDetail(String)}: when a saga's
+     * history is longer, the newest {@code maxTimelineEvents} events are returned and the detail is
+     * flagged {@link SagaDetail#isTruncated() truncated}. The full history remains in the store.
+     * Defaults to {@link #DEFAULT_MAX_TIMELINE_EVENTS} (effectively unbounded, the embedded-mode
+     * behavior); a remote front end should set a real bound.
+     *
+     * @param maxTimelineEvents the maximum number of timeline events per detail read; must be
+     *     positive
+     * @return this builder
+     */
+    public Builder maxTimelineEvents(int maxTimelineEvents) {
+      if (maxTimelineEvents < 1) {
+        throw new IllegalArgumentException(
+            "maxTimelineEvents must be positive, got " + maxTimelineEvents);
+      }
+      this.maxTimelineEvents = maxTimelineEvents;
+      return this;
+    }
+
+    /**
      * Sets the clock (for testing). Defaults to {@link Clock#systemUTC()}.
      *
      * @param clock the clock
@@ -722,6 +1494,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     /**
      * Registers a named resource for constructor injection during step resolution.
      *
+     * @param <T> the resource's static type
      * @param type the resource type
      * @param instance the resource instance
      * @param name the qualifier name (must match {@code @Named} on constructor parameters)
@@ -738,6 +1511,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     /**
      * Registers an unnamed resource for constructor injection during step resolution.
      *
+     * @param <T> the resource's static type
      * @param type the resource type
      * @param instance the resource instance
      * @return this builder
@@ -746,6 +1520,31 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       Objects.requireNonNull(type, "type must not be null");
       Objects.requireNonNull(instance, "instance must not be null");
       getOrCreateResourceRegistryBuilder().add(type, instance);
+      return this;
+    }
+
+    /**
+     * Installs a listener notified when a saga settles on this process, on a start or a resume.
+     * Defaults to {@link SettlementListener#NO_OP}.
+     *
+     * <p>A front end uses this to wake a caller waiting on a saga that parked and later resumed:
+     * the resume is a separate drive carrying no {@link com.scalar.db.saga.api.SagaCallback}, so
+     * the callback from the original start cannot fire again. See {@link SettlementListener} for
+     * what it does and does not guarantee — in particular that it is best-effort, and that a saga
+     * settled by <em>recovery</em> does not reach it even when recovery ran on this process.
+     *
+     * <p><b>No properties key accompanies this knob, deliberately.</b> Daemon mode gives every
+     * builder knob with an operator analogue a {@code scalar.db.saga.*} key, so that running as a
+     * container is never less capable than running embedded. This one has no analogue: like {@link
+     * #stepResolver} and {@link #resource}, it injects code rather than configuration, and a
+     * properties file cannot name an object.
+     *
+     * @param settlementListener the listener to notify
+     * @return this builder
+     */
+    public Builder settlementListener(SettlementListener settlementListener) {
+      this.settlementListener =
+          Objects.requireNonNull(settlementListener, "settlementListener must not be null");
       return this;
     }
 
@@ -801,36 +1600,14 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       if (baseUrl.isBlank()) {
         throw new IllegalArgumentException("baseUrl must not be blank");
       }
-      validateBaseUrl(baseUrl);
-      return new HttpEndpointBuilder(name, baseUrl);
-    }
-
-    /**
-     * Fails fast on a malformed or misleading {@code baseUrl} at build time rather than at the
-     * first saga run: it must be a valid absolute {@code http}/{@code https} URL with a host and no
-     * user-info component (a {@code user@host} authority silently retargets the host — e.g. {@code
-     * http://svc@evil.com} resolves to {@code evil.com}).
-     */
-    private static void validateBaseUrl(String baseUrl) {
-      URI uri;
+      // Fail fast here at build time rather than at the first saga run. The endpoint name is
+      // safe context; the shared validator deliberately does not echo the URL (see its javadoc).
       try {
-        uri = URI.create(baseUrl);
+        HttpServiceConfig.validateBaseUrl(baseUrl);
       } catch (IllegalArgumentException e) {
-        throw new IllegalArgumentException("baseUrl is not a valid URI: " + baseUrl, e);
+        throw new IllegalArgumentException("endpoint '" + name + "': " + e.getMessage(), e);
       }
-      String scheme = uri.getScheme();
-      if (scheme == null
-          || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) {
-        throw new IllegalArgumentException("baseUrl must use the http or https scheme: " + baseUrl);
-      }
-      if (uri.getHost() == null) {
-        throw new IllegalArgumentException("baseUrl must have a host: " + baseUrl);
-      }
-      if (uri.getUserInfo() != null) {
-        throw new IllegalArgumentException(
-            "baseUrl must not contain a user-info component (it silently retargets the host): "
-                + baseUrl);
-      }
+      return new HttpEndpointBuilder(name, baseUrl);
     }
 
     /**
@@ -889,14 +1666,14 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       }
 
       SagaStore store = null;
-      HttpEndpointRegistry httpEndpointRegistry = null;
+      HttpEndpointManager endpointManager = null;
       try {
         store = storeFactory.createStore();
         // The orchestrator owns the HTTP endpoints created from httpEndpoint(...): they are closed
         // on close (or here if build fails) — mirroring the store's lifecycle. A code step's
         // SagaHttpClient and a declarative step against the same endpoint share one HttpExchange
         // (one client, one policy).
-        httpEndpointRegistry = HttpEndpointRegistry.create(httpEndpoints, callbackUrlProvider);
+        endpointManager = HttpEndpointManager.create(httpEndpoints, callbackUrlProvider);
         StepResolver resolver = buildStepResolver();
 
         RecoveryConfig resolvedRecoveryConfig =
@@ -906,15 +1683,17 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
 
         SagaEngine.ShutdownConfig shutdownConfig =
             new SagaEngine.ShutdownConfig(shutdownMode, shutdownTimeoutMillis);
-        StepInstantiator stepInstantiator = new StepInstantiator(resolver, httpEndpointRegistry);
-        SagaEngine engine = new SagaEngine(store, stepInstantiator, ownerId, shutdownConfig, clock);
+        StepInstantiator stepInstantiator = new StepInstantiator(resolver, endpointManager);
+        SagaEngine engine =
+            new SagaEngine(
+                store, stepInstantiator, ownerId, shutdownConfig, defaultSagaTimeoutMillis, clock);
         SagaDefinitionRegistry definitionRegistry = new SagaDefinitionRegistry(store);
 
         SagaRecoveryManager recoveryManager =
             new SagaRecoveryManager(
                 store, engine, definitionRegistry, ownerId, resolvedRecoveryConfig);
         SagaRetentionManager retentionManager =
-            new SagaRetentionManager(store, resolvedRetentionConfig);
+            new SagaRetentionManager(store, ownerId, resolvedRetentionConfig);
 
         return new DefaultSagaOrchestrator(
             engine,
@@ -922,10 +1701,14 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
             definitionRegistry,
             recoveryManager,
             retentionManager,
-            shutdownTimeoutMillis);
+            shutdownTimeoutMillis,
+            maxTimelineEvents,
+            maxConcurrentSagaStarts,
+            Executors.newVirtualThreadPerTaskExecutor(),
+            settlementListener);
       } catch (Throwable t) {
         // Roll back the resources that hold real external connections: the store (DB sessions) and
-        // the HTTP endpoint registry (holds HTTP clients). Each is null if its own creation threw,
+        // the HTTP endpoint manager (holds HTTP clients). Each is null if its own creation threw,
         // so each close is null-guarded. The engine and the recovery/retention managers constructed
         // inside the try only hold executors that stay inert until started — their threads spin up
         // on start()/first task, never during build — so a failed build leaves them with no live
@@ -938,9 +1721,9 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
         // client stack, or an OutOfMemoryError while building the clients or the engine's
         // executors. The resources are still released, and t is rethrown unchanged. Precise rethrow
         // keeps this compiling without a throws clause: the try body raises no checked exceptions.
-        if (httpEndpointRegistry != null) {
+        if (endpointManager != null) {
           try {
-            httpEndpointRegistry.close();
+            endpointManager.close();
           } catch (Throwable closeException) {
             t.addSuppressed(closeException);
           }

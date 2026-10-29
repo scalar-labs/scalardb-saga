@@ -4,10 +4,14 @@ import com.scalar.db.saga.api.SagaContext;
 import com.scalar.db.saga.definition.HttpCall;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Resolves the declarative expression syntax shared by all transports (Layer 2b):
@@ -61,18 +65,59 @@ final class DeclarativeExpressions {
    * single path segment so a context value cannot inject path/query/fragment delimiters (or break
    * the request on a space). Literal template text — the {@code /} separators and any static {@code
    * ?}/{@code #} — is left untouched. A {@code /} inside a value is encoded to {@code %2F}, so the
-   * value stays one segment and cannot traverse the path (e.g. {@code ../../admin}).
+   * value stays one segment and cannot traverse the path (e.g. {@code ../../admin}). Encoding
+   * leaves {@code .} alone, so a segment that a substitution turns into exactly {@code .} or {@code
+   * ..} is rejected instead: a participant or proxy that resolves dot segments would otherwise
+   * serve a different path, and encoding the dots is no defence against a server that decodes
+   * before it resolves.
    */
   static String resolvePath(String template, SagaContext context) throws TransportException {
     rejectUnclosedPlaceholder(template);
     Matcher matcher = PLACEHOLDER.matcher(template);
     StringBuilder result = new StringBuilder();
+    BitSet substituted = new BitSet();
     while (matcher.find()) {
       String encoded = encodePathSegment(String.valueOf(requireScalar(matcher.group(1), context)));
       matcher.appendReplacement(result, Matcher.quoteReplacement(encoded));
+      substituted.set(result.length() - encoded.length(), result.length());
     }
     matcher.appendTail(result);
+    rejectSubstitutedDotSegment(result, substituted, template);
     return result.toString();
+  }
+
+  // Every '/', '?' and '#' in the resolved path comes from the template, since encoding turns one
+  // in a value into %2F, %3F or %23. So the path part ends at the first '?' or '#', and splitting
+  // it on '/' yields the segments the request will carry.
+  private static void rejectSubstitutedDotSegment(
+      StringBuilder path, BitSet substituted, String template) throws TransportException {
+    int pathEnd = path.length();
+    for (String delimiter : List.of("?", "#")) {
+      int index = path.indexOf(delimiter);
+      if (index >= 0) {
+        pathEnd = Math.min(pathEnd, index);
+      }
+    }
+    int start = 0;
+    while (start <= pathEnd) {
+      int slash = path.indexOf("/", start);
+      int end = slash < 0 || slash > pathEnd ? pathEnd : slash;
+      String segment = path.substring(start, end);
+      if ((segment.equals(".") || segment.equals(".."))
+          && substituted.nextSetBit(start) >= 0
+          && substituted.nextSetBit(start) < end) {
+        // Pre-send template resolution → the request was never built/sent, so nothing committed.
+        throw new TransportException(
+            "Path template '"
+                + template
+                + "' resolves to the dot segment '"
+                + segment
+                + "', which would change the request's path",
+            false,
+            true);
+      }
+      start = end + 1;
+    }
   }
 
   private static String encodePathSegment(String value) {
@@ -92,14 +137,39 @@ final class DeclarativeExpressions {
     return resolved;
   }
 
-  /** Resolves every value in {@code templates}, preserving types (e.g. a JSON request body). */
-  static Map<String, Object> resolveObjectMap(Map<String, String> templates, SagaContext context)
-      throws TransportException {
-    Map<String, Object> resolved = new LinkedHashMap<>();
-    for (Map.Entry<String, String> entry : templates.entrySet()) {
-      resolved.put(entry.getKey(), resolveObject(entry.getValue(), context));
+  /**
+   * Resolves a JSON request body: each string, at any depth, is resolved by {@link #resolveObject};
+   * numbers, booleans and {@code null} are sent as declared.
+   */
+  static Map<String, @Nullable Object> resolveObjectMap(
+      Map<String, ?> templates, SagaContext context) throws TransportException {
+    Map<String, @Nullable Object> resolved = new LinkedHashMap<>();
+    for (Map.Entry<String, ?> entry : templates.entrySet()) {
+      resolved.put(entry.getKey(), resolveJsonValue(entry.getValue(), context));
     }
     return resolved;
+  }
+
+  private static @Nullable Object resolveJsonValue(@Nullable Object value, SagaContext context)
+      throws TransportException {
+    if (value instanceof String template) {
+      return resolveObject(template, context);
+    }
+    if (value instanceof Map<?, ?> map) {
+      Map<String, @Nullable Object> resolved = new LinkedHashMap<>();
+      for (Map.Entry<?, ?> entry : map.entrySet()) {
+        resolved.put(String.valueOf(entry.getKey()), resolveJsonValue(entry.getValue(), context));
+      }
+      return resolved;
+    }
+    if (value instanceof List<?> list) {
+      List<@Nullable Object> resolved = new ArrayList<>();
+      for (Object element : list) {
+        resolved.add(resolveJsonValue(element, context));
+      }
+      return resolved;
+    }
+    return value;
   }
 
   /**

@@ -7,10 +7,66 @@ import com.scalar.db.saga.definition.SagaDefinition.RecoveryStrategy;
 import com.scalar.db.saga.definition.SagaDefinition.SagaMode;
 import com.scalar.db.saga.definition.SagaDefinition.StepDefinition;
 import com.scalar.db.saga.exception.SagaDefinitionException;
+import com.scalar.db.saga.exception.SagaErrorCode;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class SagaDefinitionParserTest {
+
+  // =========================================================================
+  // File and resource parsing — error-code classification
+  // =========================================================================
+
+  @Nested
+  class FileAndResourceParsing {
+
+    @TempDir Path dir;
+
+    @Test
+    void parseFile_malformedJsonFileGiven_throwsMalformedDefinitionWithFilePath() throws Exception {
+      // Arrange — a file that exists and opens fine but is not valid JSON. Jackson's parse
+      // failure extends IOException, so without a dedicated arm it would be misreported as an
+      // unreadable source.
+      Path file = dir.resolve("bad.json");
+      Files.writeString(file, "{ this is not valid json");
+
+      // Act & Assert
+      assertThatThrownBy(() -> SagaDefinitionParser.parseFile(file))
+          .isInstanceOfSatisfying(
+              SagaDefinitionException.class,
+              e -> {
+                assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.MALFORMED_DEFINITION);
+                assertThat(e.getMetadata()).containsEntry("source", file.toString());
+              });
+    }
+
+    @Test
+    void parseFile_nonexistentPathGiven_throwsUnreadableSource() {
+      // Act & Assert — a genuine I/O failure (no such file) stays UNREADABLE_DEFINITION_SOURCE
+      Path missing = dir.resolve("missing.json");
+      assertThatThrownBy(() -> SagaDefinitionParser.parseFile(missing))
+          .isInstanceOfSatisfying(
+              SagaDefinitionException.class,
+              e ->
+                  assertThat(e.getErrorCode())
+                      .isEqualTo(SagaErrorCode.UNREADABLE_DEFINITION_SOURCE));
+    }
+
+    @Test
+    void parseResource_malformedJsonResourceGiven_throwsMalformedDefinitionWithResourcePath() {
+      // Act & Assert — same classification on the classpath-resource path
+      assertThatThrownBy(() -> SagaDefinitionParser.parseResource("malformed-definition.json"))
+          .isInstanceOfSatisfying(
+              SagaDefinitionException.class,
+              e -> {
+                assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.MALFORMED_DEFINITION);
+                assertThat(e.getMetadata()).containsEntry("source", "malformed-definition.json");
+              });
+    }
+  }
 
   // =========================================================================
   // JSON parsing
@@ -617,6 +673,81 @@ class SagaDefinitionParserTest {
             "name": "bad",
             "steps": [
               { "name": "s1", "stepClass": "com.example.Step1", "extra": true }
+            ]
+          }
+          """;
+
+      // Act & Assert
+      assertThatThrownBy(() -> SagaDefinitionParser.parseJson(json))
+          .isInstanceOf(SagaDefinitionException.class);
+    }
+
+    @Test
+    void parseJson_unknownStepRetryPolicyField_throwsException() {
+      // Arrange
+      String json =
+          """
+          {
+            "name": "bad",
+            "steps": [
+              { "name": "s1", "stepClass": "com.example.Step1",
+                "retryPolicy": { "maxAttempt": 5 } }
+            ]
+          }
+          """;
+
+      // Act & Assert
+      assertThatThrownBy(() -> SagaDefinitionParser.parseJson(json))
+          .isInstanceOf(SagaDefinitionException.class);
+    }
+
+    @Test
+    void parseJson_retryPolicyOutOfRange_throwsSagaDefinitionException() {
+      // Arrange
+      String json =
+          """
+          {
+            "name": "bad",
+            "steps": [
+              { "name": "s1", "stepClass": "com.example.Step1",
+                "retryPolicy": { "maxAttempts": 0 } }
+            ]
+          }
+          """;
+
+      // Act & Assert
+      assertThatThrownBy(() -> SagaDefinitionParser.parseJson(json))
+          .isInstanceOf(SagaDefinitionException.class);
+    }
+
+    @Test
+    void parseJson_retryPolicyNotAnObject_throwsSagaDefinitionException() {
+      // Arrange
+      String json =
+          """
+          {
+            "name": "bad",
+            "steps": [
+              { "name": "s1", "stepClass": "com.example.Step1", "retryPolicy": 3 }
+            ]
+          }
+          """;
+
+      // Act & Assert
+      assertThatThrownBy(() -> SagaDefinitionParser.parseJson(json))
+          .isInstanceOf(SagaDefinitionException.class);
+    }
+
+    @Test
+    void parseJson_unknownDefaultRetryPolicyField_throwsException() {
+      // Arrange
+      String json =
+          """
+          {
+            "name": "bad",
+            "defaultRetryPolicy": { "maxAttempts": 5, "jitter": true },
+            "steps": [
+              { "name": "s1", "stepClass": "com.example.Step1" }
             ]
           }
           """;

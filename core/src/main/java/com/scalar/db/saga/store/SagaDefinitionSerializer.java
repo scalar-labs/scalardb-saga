@@ -1,6 +1,7 @@
 package com.scalar.db.saga.store;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -76,8 +77,9 @@ final class SagaDefinitionSerializer {
       root.put(RECOVERY_STRATEGY, def.getRecoveryStrategy().name());
     }
     root.put(TIMEOUT_MILLIS, def.getTimeoutMillis());
-    if (def.getDefaultRetryPolicy() != null) {
-      root.set(DEFAULT_RETRY_POLICY, serializeRetryPolicy(def.getDefaultRetryPolicy()));
+    RetryPolicy defaultRetryPolicy = def.getDefaultRetryPolicy();
+    if (defaultRetryPolicy != null) {
+      root.set(DEFAULT_RETRY_POLICY, serializeRetryPolicy(defaultRetryPolicy));
     }
     ArrayNode steps = root.putArray(STEPS);
     for (SagaDefinition.StepDefinition step : def.getSteps()) {
@@ -98,8 +100,9 @@ final class SagaDefinitionSerializer {
       if (!tcc) {
         s.put(PIVOT, step.isPivot());
       }
-      if (step.getRetryPolicy() != null) {
-        s.set(RETRY_POLICY, serializeRetryPolicy(step.getRetryPolicy()));
+      RetryPolicy retryPolicy = step.getRetryPolicy();
+      if (retryPolicy != null) {
+        s.set(RETRY_POLICY, serializeRetryPolicy(retryPolicy));
       }
     }
     return root.toString();
@@ -114,12 +117,17 @@ final class SagaDefinitionSerializer {
    */
   SagaDefinition deserialize(String json) {
     try {
-      JsonNode root = objectMapper.readTree(json);
+      // Decimals read exactly, so a stored jsonBody number compares equal to the one registered.
+      JsonNode root =
+          objectMapper
+              .reader()
+              .with(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
+              .readTree(json);
       requireFields(root, NAME, MODE, VERSION, TIMEOUT_MILLIS, STEPS);
       SagaMode mode = parseEnum(root, MODE, SagaMode.class);
       return mode == SagaMode.TCC ? deserializeTcc(root) : deserializeSaga(root);
     } catch (JsonProcessingException | RuntimeException e) {
-      throw SagaPersistenceException.nonRetryable("Failed to deserialize definition", e);
+      throw SagaPersistenceException.deserializationFailed(e);
     }
   }
 

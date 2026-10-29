@@ -7,9 +7,11 @@ import java.time.Clock;
 import java.util.Objects;
 
 /**
- * The daemon's {@link CallbackUrlProvider}: mints a signed callback URL for an async step —
+ * The daemon's {@link CallbackUrlProvider}: mints the signed URLs an async step's participant calls
+ * back on, to complete the step or to report that it failed —
  *
  * <pre>{@code {baseUrl}/sagas/{sagaId}/steps/{stepName}/complete?token={hmac}&iat={epochSeconds}}
+ * {@code {baseUrl}/sagas/{sagaId}/steps/{stepName}/fail?token={hmac}&iat={epochSeconds}}
  * </pre>
  *
  * where {@code token} is {@link HmacUtils#hmacSha256Hex} over {@link HmacUtils#callbackSignedData}.
@@ -24,6 +26,8 @@ public final class HmacCallbackUrlProvider implements CallbackUrlProvider {
   private final Clock clock;
 
   /**
+   * Creates a provider that signs with {@code secret} and stamps {@code iat} from {@code clock}.
+   *
    * @param baseUrl the daemon's externally-reachable base URL (no trailing slash)
    * @param secret the HMAC callback secret (must match the verifying route's)
    * @param clock the clock for the {@code iat} issue time
@@ -36,16 +40,31 @@ public final class HmacCallbackUrlProvider implements CallbackUrlProvider {
 
   @Override
   public String callbackUrl(String sagaId, String stepName) {
+    return signedUrl(sagaId, stepName, HmacUtils.COMPLETE);
+  }
+
+  @Override
+  public String failureUrl(String sagaId, String stepName) {
+    return signedUrl(sagaId, stepName, HmacUtils.FAIL);
+  }
+
+  /**
+   * A signed URL for {@code action} on the step. The action is part of the signed data, so the
+   * token is accepted on that route only.
+   */
+  private String signedUrl(String sagaId, String stepName, String action) {
     long iat = clock.instant().getEpochSecond();
     String token =
         HmacUtils.hmacSha256Hex(
-            secret, HmacUtils.callbackSignedData(sagaId, stepName, Long.toString(iat)));
+            secret, HmacUtils.callbackSignedData(sagaId, stepName, action, Long.toString(iat)));
     return baseUrl
         + "/sagas/"
         + encodePathSegment(sagaId)
         + "/steps/"
         + encodePathSegment(stepName)
-        + "/complete?token="
+        + "/"
+        + action
+        + "?token="
         + token
         + "&iat="
         + iat;

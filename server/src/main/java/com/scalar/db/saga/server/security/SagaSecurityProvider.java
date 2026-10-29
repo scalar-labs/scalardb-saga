@@ -34,6 +34,8 @@ public interface SagaSecurityProvider extends AutoCloseable {
   /**
    * Returns a short, stable name for this provider (e.g. {@code "noop"}, {@code "jwt"}, {@code
    * "apikey"}) for logging and diagnostics.
+   *
+   * @return the provider's name
    */
   String name();
 

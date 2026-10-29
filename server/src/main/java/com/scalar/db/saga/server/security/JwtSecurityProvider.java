@@ -24,6 +24,7 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.Properties;
 import java.util.Set;
+import javax.net.ssl.SSLSocketFactory;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -44,6 +45,18 @@ import org.jspecify.annotations.Nullable;
 public final class JwtSecurityProvider implements SagaSecurityProvider {
 
   private static final String BEARER_PREFIX = "Bearer ";
+
+  /**
+   * Parses and validates the JWT settings without building a provider, for {@code
+   * --validate-config}: building one starts the JWKS refresh executor, and this command promises to
+   * allocate nothing and call nothing.
+   *
+   * @param properties the resolved server properties
+   * @throws IllegalArgumentException if the JWT settings are missing or invalid
+   */
+  public static void validate(Properties properties) {
+    JwtConfig.from(properties);
+  }
 
   /**
    * The accepted JWS signature algorithms: the RSA ({@code RS*}/{@code PS*}) and EC ({@code ES*})
@@ -105,22 +118,31 @@ public final class JwtSecurityProvider implements SagaSecurityProvider {
    * tokens against the configured remote JWKS.
    *
    * @param properties the (secret-resolved) server properties
+   * @param sslSocketFactory the factory the JWKS fetch connects through, carrying the daemon's
+   *     outbound trust; {@code null} for the JVM default
    * @return the provider
    * @throws IllegalArgumentException if the JWT configuration is missing/invalid (see {@link
    *     JwtConfig})
    */
-  public static JwtSecurityProvider create(Properties properties) {
-    return create(JwtConfig.from(properties));
+  public static JwtSecurityProvider create(
+      Properties properties, @Nullable SSLSocketFactory sslSocketFactory) {
+    return create(JwtConfig.from(properties), sslSocketFactory);
   }
 
-  private static JwtSecurityProvider create(JwtConfig config) {
+  private static JwtSecurityProvider create(
+      JwtConfig config, @Nullable SSLSocketFactory sslSocketFactory) {
     // The default JWKS source caches keys and refreshes ahead of expiry on a dedicated executor
     // thread; that executor is released by close().
     JWKSource<SecurityContext> jwkSource =
         JWKSourceBuilder.create(
                 config.jwksUrl(),
+                // No size limit and disconnect after use, as the two-argument form defaults to.
                 new DefaultResourceRetriever(
-                    config.connectTimeoutMillis(), config.readTimeoutMillis()))
+                    config.connectTimeoutMillis(),
+                    config.readTimeoutMillis(),
+                    0,
+                    true,
+                    sslSocketFactory))
             .build();
     JWTProcessor<SecurityContext> processor =
         buildProcessor(

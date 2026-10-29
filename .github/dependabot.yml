@@ -26,6 +26,7 @@ updates:
           - "com.uber.nullaway*"
           - "com.vanniktech*"
           - "net.ltgt.gradle*"
+          - "org.gradle.toolchains*"
       # gRPC ships its modules as a set and the BOM must match the stubs.
       grpc:
         patterns:
@@ -36,8 +37,10 @@ updates:
         patterns:
           - "io.netty*"
 
+  # `/` covers only .github/workflows; the composite actions under .github/actions are listed
+  # separately, or the actions they call would never be bumped.
   - package-ecosystem: github-actions
-    directory: /
+    directories: ["/", "/.github/actions/*"]
     schedule:
       interval: weekly
     groups:
@@ -51,18 +54,52 @@ updates:
     directory: /server/docker
     schedule:
       interval: weekly
+    ignore:
+      # Only the LTS majors (21, 25, ...) keep receiving patches; the six-month interim releases die
+      # the moment the next one ships, so a major bump would usually land the image on an
+      # already-dead JRE. Moving to the next LTS is a deliberate manual change. The digest updates
+      # that deliver each security rebuild of the current tag are a different update type, which this
+      # rule does not touch.
+      - dependency-name: "eclipse-temurin"
+        update-types: ["version-update:semver-major"]
 
-  # Every entry above targets the default branch only. A minor version branch receives nothing until
-  # it is named by a `target-branch`, so a maintained line would otherwise sit on frozen dependencies
-  # for its whole life. When a release branch is cut, add a copy of each entry above naming it, and
-  # delete those copies when that line reaches end of life. Entries naming a branch that does not yet
-  # exist produce errors, which is why they are not written ahead of time.
+  # --- Release branches: github-actions only ---
+  # Gradle and Docker bumps deliberately have no target-branch copies: they land on main once and
+  # reach the release lines as Auto-PR cherry-pick backports (.github/workflows/auto-pr.yml),
+  # driven by the family-shared "ScalarDB <version>" projects attached to the merged PR — the same model the
+  # other Scalar repositories use. One bump, one review, per-line backport PRs generated on merge.
+  # Workflow files are the exception: they drift between lines (each branch's CI evolves
+  # separately), so a cherry-pick of a workflow bump conflicts more often than it applies, and each
+  # line keeps its own github-actions entry instead.
+  - package-ecosystem: github-actions
+    directories: ["/", "/.github/actions/*"]
+    target-branch: "3"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: github-actions
+    directories: ["/", "/.github/actions/*"]
+    target-branch: "3.19"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  # The entries without a `target-branch` cover the default branch; the github-actions blocks after
+  # them cover one release branch each. A version branch receives no workflow updates until it is
+  # named by a `target-branch`, so when a release branch is cut, add a copy of the github-actions
+  # entry naming it (the family-shared "ScalarDB <version>" project for the line normally already
+  # exists, created by the ScalarDB release cycle, so gradle and Docker bumps reach it as backports) — and delete the block again when the line reaches end of life.
+  # Entries naming a branch that does not yet exist produce errors, which is why they are not
+  # written ahead of time. Re-indent as you paste: an off-by-two does not disable one entry, it
+  # makes the whole file unparseable, which stops every update on every branch at once, silently.
   #
-  # Step 1 of RELEASING.md says how: copy the entries above on the default branch and give each copy a
-  # target-branch. There is deliberately no commented-out template here, and no second copy of these
-  # entries in RELEASING.md either. Both have to be re-indented as they are pasted, and an off-by-two
-  # leaves a block sequence whose items do not line up. That does not disable one entry; it makes the
-  # whole file unparseable, which stops every update on every branch at once, silently.
-  #
-  # Known limitation: Dependabot *security* updates only ever target the default branch. An entry with
-  # `target-branch` produces version updates alone, so a CVE fix still has to be backported by hand.
+  # Known limitation: Dependabot *security* updates only ever target the default branch. That is
+  # now the working model rather than a gap — the security bump merges on main and its backport PRs
+  # carry it to every line whose project is attached.

@@ -9,14 +9,13 @@ class SagaStateSnapshotTest {
 
   private static final String SAGA_ID = "saga-001";
   private static final String SAGA_NAME = "order-saga";
-  private static final String OWNER_ID = "node-1";
   private static final String DEFINITION_VERSION = "1.0";
   private static final Instant CREATED_AT = Instant.parse("2026-01-01T00:00:00Z");
   private static final Instant UPDATED_AT = Instant.parse("2026-01-01T01:00:00Z");
 
   private SagaStateSnapshot createSnapshot(SagaStatus status) {
     return new SagaStateSnapshot(
-        SAGA_ID, SAGA_NAME, status, OWNER_ID, DEFINITION_VERSION, CREATED_AT, UPDATED_AT);
+        SAGA_ID, SAGA_NAME, status, DEFINITION_VERSION, CREATED_AT, UPDATED_AT);
   }
 
   @Test
@@ -28,7 +27,6 @@ class SagaStateSnapshotTest {
     assertThat(snapshot.getSagaId()).isEqualTo(SAGA_ID);
     assertThat(snapshot.getSagaName()).isEqualTo(SAGA_NAME);
     assertThat(snapshot.getStatus()).isEqualTo(SagaStatus.RUNNING);
-    assertThat(snapshot.getOwnerId()).isEqualTo(OWNER_ID);
     assertThat(snapshot.getDefinitionVersion()).isEqualTo(DEFINITION_VERSION);
     assertThat(snapshot.getCreatedAt()).isEqualTo(CREATED_AT);
     assertThat(snapshot.getUpdatedAt()).isEqualTo(UPDATED_AT);
@@ -60,7 +58,6 @@ class SagaStateSnapshotTest {
     // Assert
     assertThat(transitioned.getSagaId()).isEqualTo(SAGA_ID);
     assertThat(transitioned.getSagaName()).isEqualTo(SAGA_NAME);
-    assertThat(transitioned.getOwnerId()).isEqualTo(OWNER_ID);
     assertThat(transitioned.getDefinitionVersion()).isEqualTo(DEFINITION_VERSION);
     assertThat(transitioned.getCreatedAt()).isEqualTo(CREATED_AT);
   }
@@ -109,7 +106,6 @@ class SagaStateSnapshotTest {
             "different-id",
             SAGA_NAME,
             SagaStatus.RUNNING,
-            OWNER_ID,
             DEFINITION_VERSION,
             CREATED_AT,
             UPDATED_AT);

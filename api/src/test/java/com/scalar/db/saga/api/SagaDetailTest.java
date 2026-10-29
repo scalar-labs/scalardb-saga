@@ -13,7 +13,7 @@ class SagaDetailTest {
   private static final Instant TS = Instant.parse("2026-07-13T10:00:00Z");
 
   private static SagaStateSnapshot snapshot() {
-    return new SagaStateSnapshot("saga-1", "order", SagaStatus.ESCALATED, "owner", "v1", TS, TS);
+    return new SagaStateSnapshot("saga-1", "order", SagaStatus.ESCALATED, "v1", TS, TS);
   }
 
   private static TimelineEvent event() {
@@ -21,13 +21,23 @@ class SagaDetailTest {
   }
 
   @Test
-  void constructor_snapshotAndTimelineGiven_exposesBoth() {
+  void constructor_snapshotAndTimelineGiven_exposesBothAndDefaultsToNotTruncated() {
     // Act
     SagaDetail detail = new SagaDetail(snapshot(), List.of(event()));
 
     // Assert
     assertThat(detail.getSnapshot()).isEqualTo(snapshot());
     assertThat(detail.getTimeline()).containsExactly(event());
+    assertThat(detail.isTruncated()).isFalse();
+  }
+
+  @Test
+  void constructor_truncatedGiven_exposesFlag() {
+    // Act
+    SagaDetail detail = new SagaDetail(snapshot(), List.of(event()), true);
+
+    // Assert
+    assertThat(detail.isTruncated()).isTrue();
   }
 
   @Test
@@ -63,6 +73,16 @@ class SagaDetailTest {
     // Act & Assert
     assertThat(a).isEqualTo(b);
     assertThat(a.hashCode()).isEqualTo(b.hashCode());
+  }
+
+  @Test
+  void equals_truncatedDiffers_returnsFalse() {
+    // Arrange
+    SagaDetail full = new SagaDetail(snapshot(), List.of(event()), false);
+    SagaDetail truncated = new SagaDetail(snapshot(), List.of(event()), true);
+
+    // Act & Assert
+    assertThat(full).isNotEqualTo(truncated);
   }
 
   @SuppressWarnings("NullAway")

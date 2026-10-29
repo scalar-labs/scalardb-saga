@@ -1,22 +1,82 @@
 package com.scalar.db.saga.exception;
 
 import java.util.Objects;
+import org.jspecify.annotations.Nullable;
 
 /**
- * Thrown when the overall saga deadline expires (checked between steps).
+ * Thrown when a saga-level wait expires client-side. Carries one of two codes, chosen by the
+ * factory, because the two situations demand opposite reactions:
+ *
+ * <ul>
+ *   <li>{@link SagaErrorCode#REQUEST_TIMEOUT} — the request itself did not complete (a gRPC {@code
+ *       DEADLINE_EXCEEDED}); retry it or raise the deadline. Construct via {@link
+ *       #requestTimedOut(Throwable)}.
+ *   <li>{@link SagaErrorCode#SAGA_AWAIT_TIMEOUT} — the caller's wait-for-terminal budget expired
+ *       before the saga settled. Poll the saga by ID to learn where it stands; a re-send has to
+ *       reuse that ID. Construct via {@link #awaitExpired(String)}.
+ * </ul>
+ *
+ * <p>Only the await flavour carries a saga ID, and it always does: a blocking {@code start} that
+ * mints the ID itself has not returned it yet, so this exception is the caller's only copy of it. A
+ * request timeout is mapped from a bare transport status with no saga in view, so {@link
+ * #getSagaId()} is null there.
+ *
+ * <p>The ID does not promise that a saga exists. The wait budget usually expires with the saga
+ * known to be running, but it can also expire while the first start request is still being retried,
+ * where whether anything was persisted is exactly what is unknown. The ID answers that too: it is
+ * the idempotency key the start was sent under, so polling it either finds the saga or reports it
+ * missing.
  *
  * <p>This is an unchecked exception in a separate hierarchy from {@link StepTimeoutException}
  * because saga-level and step-level timeouts are semantically different.
  */
 public class SagaTimeoutException extends SagaRuntimeException {
 
-  public SagaTimeoutException(String message) {
-    super(Objects.requireNonNull(message, "message must not be null"));
+  /** The ID the expired wait was waiting on; null for a request timeout. */
+  private final @Nullable String sagaId;
+
+  private SagaTimeoutException(String sagaId) {
+    super(
+        SagaErrorCode.SAGA_AWAIT_TIMEOUT,
+        ErrorMetadata.of("saga_id", Objects.requireNonNull(sagaId, "sagaId must not be null")));
+    this.sagaId = sagaId;
   }
 
-  public SagaTimeoutException(String message, Throwable cause) {
-    super(
-        Objects.requireNonNull(message, "message must not be null"),
-        Objects.requireNonNull(cause, "cause must not be null"));
+  private SagaTimeoutException(SagaErrorCode code, Throwable cause) {
+    super(code, ErrorMetadata.of(), Objects.requireNonNull(cause, "cause must not be null"));
+    this.sagaId = null;
+  }
+
+  /**
+   * The request itself did not complete before its deadline; the transport status is the cause.
+   *
+   * @param cause the transport status that reported the expired deadline
+   * @return the exception to throw, carrying {@link SagaErrorCode#REQUEST_TIMEOUT}
+   */
+  public static SagaTimeoutException requestTimedOut(Throwable cause) {
+    return new SagaTimeoutException(SagaErrorCode.REQUEST_TIMEOUT, cause);
+  }
+
+  /**
+   * The saga did not reach a terminal state within the client-side wait bound. The caller polls
+   * {@code sagaId} to learn where it stands, and reuses that ID for any re-send.
+   *
+   * @param sagaId the ID the saga was started under: the handle to poll it by, and the key that
+   *     resolves whether an ambiguous start landed
+   * @return the exception to throw, carrying {@link SagaErrorCode#SAGA_AWAIT_TIMEOUT}
+   */
+  public static SagaTimeoutException awaitExpired(String sagaId) {
+    return new SagaTimeoutException(sagaId);
+  }
+
+  /**
+   * The ID the expired wait was waiting on, or null when this is a {@link
+   * SagaErrorCode#REQUEST_TIMEOUT}. Non-null for {@link SagaErrorCode#SAGA_AWAIT_TIMEOUT}, where it
+   * is what the code's remediation tells the caller to poll.
+   *
+   * @return the saga ID, or {@code null} for a request timeout
+   */
+  public @Nullable String getSagaId() {
+    return sagaId;
   }
 }

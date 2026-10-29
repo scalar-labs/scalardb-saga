@@ -2,6 +2,7 @@ package com.scalar.db.saga.api;
 
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaPermissionDeniedException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
@@ -12,6 +13,14 @@ import com.scalar.db.saga.exception.SagaUnauthenticatedException;
  * ones that need an operator. Implemented in-process by {@code DefaultSagaAdminService} and
  * remotely by {@code GrpcSagaAdminClient} (the Java 8 client SDK), so the same surface works
  * embedded or against a saga server.
+ *
+ * <p><b>Deciding what to retry.</b> Key on {@link
+ * com.scalar.db.saga.exception.SagaErrorCode.Category#RETRYABLE_SERVER_ERROR} via {@code
+ * e.getErrorCode().category()} rather than on a single exception type. A transient store failure
+ * reaches a remote caller as {@link com.scalar.db.saga.exception.SagaPersistenceException} (the
+ * type the engine threw, reconstructed from the wire) while a connectivity failure that never
+ * reached the server arrives as {@link com.scalar.db.saga.exception.SagaUnavailableException}. Both
+ * are retryable, and only the category covers both.
  *
  * <p><b>Direction-agnostic mutations.</b> The operator never chooses "compensate" vs. "resume
  * forward" — the engine decides from the saga's pivot, exactly as automatic recovery does. The
@@ -52,9 +61,20 @@ public interface SagaAdminService extends AutoCloseable {
    * Lists saga state snapshots matching {@code query}, one page at a time. Drive pagination by the
    * returned {@link SagaPage#getNextPageToken()} until it is {@code null}.
    *
+   * <p>A returned page can exceed the requested page size — even {@link SagaQuery#MAX_PAGE_SIZE}.
+   * Results are scanned one internal {@code (bucket, status)} slice at a time, and a page never
+   * splits a slice's same-{@code updated_at} cohort: the cohort straddling the page boundary is
+   * completed whole. A mass event that stamps many sagas in the same millisecond (e.g. a burst
+   * outage escalating a large batch at once) therefore produces over-sized pages — each slice's
+   * share of that millisecond returns whole in whichever page reaches it, on top of up to a full
+   * target of rows from earlier slices. Budget client-side memory and transport message limits for
+   * the requested page size plus the largest cohort a mass event can produce. See {@link
+   * SagaQuery.Builder#pageSize(int)}.
+   *
    * @param query the status/time filter, page size, and continuation token
    * @return a page of matching snapshots and a token for the next page
-   * @throws IllegalArgumentException if the page token is malformed (the daemon maps this to 400)
+   * @throws SagaIllegalArgumentException if the page token is malformed (the daemon maps this to
+   *     400); both implementations throw it, so the same handling works embedded and remote
    */
   SagaPage<SagaStateSnapshot> listSagas(SagaQuery query);
 
@@ -84,6 +104,8 @@ public interface SagaAdminService extends AutoCloseable {
    * @throws SagaDefinitionNotFoundException if the saga's definition is no longer registered, so
    *     the engine cannot drive it
    * @throws SagaConcurrentModificationException if a concurrent writer changed the saga first
+   * @throws SagaIllegalArgumentException if {@code reason} is blank or exceeds the audit length
+   *     limit
    */
   SagaStateSnapshot recoverSaga(String sagaId, String reason);
 
@@ -98,6 +120,8 @@ public interface SagaAdminService extends AutoCloseable {
    * @throws SagaNotFoundException if no such saga exists
    * @throws SagaStatePreconditionException if the saga is not {@code ESCALATED}
    * @throws SagaConcurrentModificationException if a concurrent writer changed the saga first
+   * @throws SagaIllegalArgumentException if {@code reason} is blank or exceeds the audit length
+   *     limit
    */
   SagaStateSnapshot forceComplete(String sagaId, String reason);
 
@@ -119,6 +143,8 @@ public interface SagaAdminService extends AutoCloseable {
    *     the engine cannot drive it — the single-saga counterpart of the bulk form's {@link
    *     ResetResult.SkipReason#DEFINITION_NOT_FOUND}
    * @throws SagaConcurrentModificationException if a concurrent writer changed the saga first
+   * @throws SagaIllegalArgumentException if {@code reason} is blank or exceeds the audit length
+   *     limit
    */
   SagaStateSnapshot resetEscalated(String sagaId, String reason);
 
@@ -135,11 +161,26 @@ public interface SagaAdminService extends AutoCloseable {
    * saga never stops the sweep from reaching the rest. A failure of the store itself is not a
    * per-row skip: it aborts the call, since every remaining row would fail the same way.
    *
+   * <p>A client deadline that fires mid-sweep does not abort or undo the server's work, but the
+   * outcome is unknown to the caller: the sweep may complete the page after the deadline, or a
+   * store failure may still abort it. Treat a timeout as an unknown outcome, not a failure.
+   * Retrying is safe and cheap: every reset row leaves the {@code ESCALATED} filter, so a retry —
+   * even from the start, without the lost continuation token — sweeps only what is still escalated.
+   * Cheap assumes the timed-out attempt has drained: it is not cancelled, so an immediate retry
+   * runs concurrently with it — both re-materialize the still-escalated rows, and each contested
+   * row costs one attempt a lost CAS, reported in {@link ResetResult#getSkipped()} as {@link
+   * ResetResult.SkipReason#CONCURRENT_MODIFICATION}. That still converges (every reset commits in
+   * its own transaction), but it doubles the scan at the worst moment; prefer retrying after
+   * roughly the call's usual duration rather than immediately. A mass escalation stamped into one
+   * {@code updated_at} millisecond makes over-sized pages (see {@link
+   * SagaQuery.Builder#pageSize(int)}), which are the sweeps most likely to outlive a short client
+   * deadline.
+   *
    * @param query the page of escalated sagas to sweep (status filter fixed to {@code ESCALATED})
    * @param reason why the operator is un-escalating (recorded per row for audit; must be non-blank)
    * @return the per-page counts and the token to continue the sweep
-   * @throws IllegalArgumentException if {@code query} sets a status other than {@code ESCALATED},
-   *     or its page token is malformed (the daemon maps this to 400)
+   * @throws SagaIllegalArgumentException if {@code query} sets a status other than {@code
+   *     ESCALATED}, or its page token is malformed (the daemon maps this to 400)
    */
   ResetResult resetEscalated(SagaQuery query, String reason);
 

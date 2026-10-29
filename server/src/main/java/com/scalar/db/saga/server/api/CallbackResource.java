@@ -3,39 +3,53 @@ package com.scalar.db.saga.server.api;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
+import com.scalar.db.saga.exception.SagaInvalidRequestException;
 import com.scalar.db.saga.server.security.SagaOperation;
-import io.javalin.Javalin;
 import io.javalin.http.Context;
+import io.javalin.router.JavalinDefaultRoutingApi;
 import java.time.Clock;
 import java.util.Map;
 import java.util.regex.Pattern;
+import org.jspecify.annotations.Nullable;
 
 /**
- * Registers the async-callback completion route:
+ * Registers the async-callback routes, on which a participant reports the outcome of an async
+ * (parked) step. The daemon verifies the per-step HMAC callback token on both, and a token is
+ * accepted only on the route it was minted for:
  *
  * <ul>
- *   <li>{@code POST /sagas/{id}/steps/{stepName}/complete?token=&iat=} — a participant reports the
- *       result of an async (parked) step. The daemon verifies the per-step HMAC callback token,
- *       then resumes the saga from the next step via {@link
+ *   <li>{@code POST /sagas/{id}/steps/{stepName}/complete?token=&iat=} — the step succeeded. The
+ *       body's JSON object is the step's output, and the saga resumes from the next step via {@link
  *       DefaultSagaOrchestrator#completeStepAsync}.
+ *   <li>{@code POST /sagas/{id}/steps/{stepName}/fail?token=&iat=} — the step failed. An optional
+ *       body {@code {"error": "..."}} says why, and {@code X-Saga-Retryable: true} asks for the
+ *       step to be retried. The step is re-issued or given up via {@link
+ *       DefaultSagaOrchestrator#failStepAsync}.
  * </ul>
  *
- * <p><b>Auth.</b> This route is authenticated by the HMAC callback token, <em>not</em> by the
+ * <p><b>Auth.</b> Both routes are authenticated by the HMAC callback token, <em>not</em> by the
  * caller-facing auth (e.g. JWT) that guards the other endpoints — a participant service holds a
- * signed callback URL, not a user credential. The route is therefore tagged {@link
+ * signed callback URL, not a user credential. The routes are therefore tagged {@link
  * SagaOperation#CALLBACK}, which the security layer treats as exempt. An optional {@code iat} TTL
  * (configured via {@code register}) additionally rejects a token older than a maximum age, so a
  * leaked callback URL is not a non-expiring credential.
  *
- * <p><b>Idempotency.</b> A callback for a saga that is no longer {@code WAITING} — a duplicate
- * callback (a prior one already resumed it) or a late one (the timeout sweep already resolved it) —
- * is a no-op that returns the saga's current state rather than an error, so a participant that
- * retries its callback sees a consistent {@code 200}.
+ * <p><b>Idempotency.</b> A callback or failure report for a step that is no longer parked — a
+ * duplicate (a prior report already resumed or failed it) or a late one (the timeout sweep already
+ * resolved it) — is a no-op that returns the saga's current state rather than an error, so a
+ * participant that retries its report sees a consistent {@code 200}.
  */
 public final class CallbackResource {
 
   /** The callback route path (a Javalin path-parameter pattern). */
   public static final String PATH = "/sagas/{id}/steps/{stepName}/complete";
+
+  /** The failure route path (a Javalin path-parameter pattern). */
+  public static final String FAIL_PATH = "/sagas/{id}/steps/{stepName}/fail";
+
+  // The header a participant sets to ask for a failed step to be retried, as on a synchronous
+  // response. The name mirrors the engine's internal HttpHeaders, not visible from here.
+  private static final String RETRYABLE_HEADER = "X-Saga-Retryable";
 
   /**
    * A callback token is the lowercase-hex HMAC-SHA256 output: exactly 64 chars of {@code [0-9a-f]}.
@@ -45,28 +59,30 @@ public final class CallbackResource {
   private CallbackResource() {}
 
   /**
-   * Registers the callback route on the given app.
+   * Registers the completion and failure routes on the given routing configuration.
    *
-   * @param app the Javalin app
+   * @param routes the routing configuration the server is created with
    * @param orchestrator the orchestrator whose {@link DefaultSagaOrchestrator#completeStepAsync}
-   *     resumes the parked saga
+   *     resumes the parked saga, and whose {@link DefaultSagaOrchestrator#failStepAsync} settles a
+   *     reported failure
    * @param callbackSecret the HMAC secret the callback token is verified against
    * @param maxAgeSeconds the {@code iat} TTL in seconds; a token older than this is rejected as
    *     expired. {@code 0} disables the check
    * @param clock the clock used to age the token's {@code iat} against {@code maxAgeSeconds}
    */
   public static void register(
-      Javalin app,
+      JavalinDefaultRoutingApi routes,
       DefaultSagaOrchestrator orchestrator,
       String callbackSecret,
       long maxAgeSeconds,
       Clock clock) {
-    app.post(
+    routes.post(
         PATH,
         ctx -> {
           String sagaId = ctx.pathParam("id");
           String stepName = ctx.pathParam("stepName");
-          verifyToken(ctx, callbackSecret, maxAgeSeconds, clock, sagaId, stepName);
+          verifyToken(
+              ctx, callbackSecret, maxAgeSeconds, clock, sagaId, stepName, HmacUtils.COMPLETE);
           Map<String, Object> output = parseOutput(ctx);
           SagaStateSnapshot snapshot = complete(orchestrator, sagaId, stepName, output);
           ctx.status(200).json(SagaSnapshotResponse.from(snapshot));
@@ -75,15 +91,60 @@ public final class CallbackResource {
         // provider credential check here would reject a participant's callback with 401 before the
         // HMAC check ran, breaking async completion.
         SagaOperation.CALLBACK);
+    routes.post(
+        FAIL_PATH,
+        ctx -> {
+          String sagaId = ctx.pathParam("id");
+          String stepName = ctx.pathParam("stepName");
+          verifyToken(ctx, callbackSecret, maxAgeSeconds, clock, sagaId, stepName, HmacUtils.FAIL);
+          String error = parseError(ctx);
+          boolean retryable = "true".equalsIgnoreCase(trimmedHeader(ctx, RETRYABLE_HEADER));
+          SagaStateSnapshot snapshot = fail(orchestrator, sagaId, stepName, error, retryable);
+          ctx.status(200).json(SagaSnapshotResponse.from(snapshot));
+        },
+        // Exempt for the same reason as the completion route.
+        SagaOperation.CALLBACK);
+  }
+
+  private static @Nullable String trimmedHeader(Context ctx, String name) {
+    String value = ctx.header(name);
+    return value == null ? null : value.trim();
   }
 
   /**
-   * Verifies the HMAC token over the data produced by {@link HmacUtils#callbackSignedData}. Both
-   * {@code token} and {@code iat} query parameters are required (the token is computed over {@code
-   * iat}, so it cannot be checked without it). The token must match the lowercase-hex HMAC-SHA256
-   * shape before the signature is checked, so a malformed value is rejected without computing an
-   * HMAC. When {@code maxAgeSeconds} is positive, an authenticated token older than that is
-   * rejected as expired. Any missing, malformed, non-matching, or expired value throws {@link
+   * Parses the failure body's optional {@code error}: an empty body, or one without the field,
+   * reports no reason. A body that is not a JSON object, or an {@code error} that is not a string,
+   * maps to {@code 400}.
+   */
+  private static @Nullable String parseError(Context ctx) {
+    String body = ctx.body();
+    if (body.isBlank()) {
+      return null;
+    }
+    Map<?, ?> parsed;
+    try {
+      parsed = ctx.bodyAsClass(Map.class);
+    } catch (Exception e) {
+      throw new SagaInvalidRequestException("malformed failure body");
+    }
+    Object error = parsed == null ? null : parsed.get("error");
+    if (error == null) {
+      return null;
+    }
+    if (!(error instanceof String text)) {
+      throw new SagaInvalidRequestException("failure body field 'error' must be a string");
+    }
+    return text;
+  }
+
+  /**
+   * Verifies the HMAC token over the data produced by {@link HmacUtils#callbackSignedData} for this
+   * route's {@code action}, so a token minted for the other route is rejected. Both {@code token}
+   * and {@code iat} query parameters are required (the token is computed over {@code iat}, so it
+   * cannot be checked without it). The token must match the lowercase-hex HMAC-SHA256 shape before
+   * the signature is checked, so a malformed value is rejected without computing an HMAC. When
+   * {@code maxAgeSeconds} is positive, an authenticated token older than that is rejected as
+   * expired. Any missing, malformed, non-matching, or expired value throws {@link
    * CallbackAuthException} → {@code 401}.
    */
   private static void verifyToken(
@@ -92,7 +153,8 @@ public final class CallbackResource {
       long maxAgeSeconds,
       Clock clock,
       String sagaId,
-      String stepName) {
+      String stepName,
+      String action) {
     String token = ctx.queryParam("token");
     String iat = ctx.queryParam("iat");
     if (token == null || token.isBlank() || iat == null || iat.isBlank()) {
@@ -101,7 +163,7 @@ public final class CallbackResource {
     if (!TOKEN_PATTERN.matcher(token).matches()) {
       throw new CallbackAuthException("malformed callback token");
     }
-    String data = HmacUtils.callbackSignedData(sagaId, stepName, iat);
+    String data = HmacUtils.callbackSignedData(sagaId, stepName, action, iat);
     if (!HmacUtils.verify(callbackSecret, data, token)) {
       throw new CallbackAuthException("invalid callback token");
     }
@@ -142,7 +204,7 @@ public final class CallbackResource {
       Map<String, Object> parsed = ctx.bodyAsClass(Map.class);
       output = parsed;
     } catch (Exception e) {
-      throw new InvalidRequestException("malformed callback body");
+      throw new SagaInvalidRequestException("malformed callback body");
     }
     // A body of the JSON null literal deserializes to null without throwing; treat it as no output.
     return output == null ? Map.of() : output;
@@ -155,8 +217,17 @@ public final class CallbackResource {
    * cases map to an idempotent snapshot read: a duplicate callback ({@link IllegalStateException} —
    * already resumed) or a callback that lost the race to the timeout sweep ({@link
    * SagaConcurrentModificationException}) returns the saga's current state instead of failing. A
-   * wrong step name ({@link IllegalArgumentException}) and an unknown saga ({@code
-   * SagaNotFoundException}) propagate to the error mapper (400 / 404).
+   * wrong step name or an output value a context cannot carry ({@code
+   * SagaIllegalArgumentException}) and an unknown saga ({@code SagaNotFoundException}) propagate to
+   * the error mapper (400 / 404). So does a callback that arrived before the saga finished parking
+   * on its step ({@code SagaStepNotParkedException}), which answers 503 with {@code Retry-After}:
+   * acking it would lose the callback, and the participant's retry completes the step once the park
+   * is recorded.
+   *
+   * <p>Only the two idempotent cases are caught below, and they are caught by type. {@code
+   * SagaIllegalArgumentException} extends {@code SagaRuntimeException}, not {@link
+   * IllegalArgumentException}, so widening this catch to the latter would add a clause that never
+   * fires.
    */
   private static SagaStateSnapshot complete(
       DefaultSagaOrchestrator orchestrator,
@@ -165,6 +236,24 @@ public final class CallbackResource {
       Map<String, Object> output) {
     try {
       return orchestrator.completeStepAsync(sagaId, stepName, output);
+    } catch (IllegalStateException | SagaConcurrentModificationException e) {
+      return orchestrator.getStateSnapshot(sagaId);
+    }
+  }
+
+  /**
+   * Settles the parked step as failed and returns the resulting snapshot, with the same idempotent
+   * cases as {@link #complete}: a report for a step that has already resumed, failed or timed out
+   * returns the saga's current state, and the other refusals propagate to the error mapper.
+   */
+  private static SagaStateSnapshot fail(
+      DefaultSagaOrchestrator orchestrator,
+      String sagaId,
+      String stepName,
+      @Nullable String error,
+      boolean retryable) {
+    try {
+      return orchestrator.failStepAsync(sagaId, stepName, error, retryable);
     } catch (IllegalStateException | SagaConcurrentModificationException e) {
       return orchestrator.getStateSnapshot(sagaId);
     }

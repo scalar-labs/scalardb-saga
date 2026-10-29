@@ -1,11 +1,11 @@
 package com.scalar.db.saga.definition;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.scalar.db.saga.api.HttpMethod;
 import com.scalar.db.saga.exception.SagaDefinitionException;
-import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
@@ -46,6 +46,10 @@ public final class CallSpecCodec {
   private static final String CONFIRMATION = "confirmation";
   private static final String CANCELLATION = "cancellation";
 
+  // Reads a jsonBody tree into plain values; decimals stay exact, as the tree readers keep them.
+  private static final ObjectMapper MAPPER =
+      new ObjectMapper().enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
+
   // The HTTP call spec's own keys. The values of QUERY/JSON_BODY/OUTPUT are free-form user maps and
   // are not validated here.
   private static final Set<String> KNOWN_HTTP_FIELDS =
@@ -65,6 +69,10 @@ public final class CallSpecCodec {
   /**
    * Reads the {@code transport} field of a declaratively-defined service step node, defaulting to
    * {@link CallSpec.Transport#HTTP} when absent. Rejects an unknown or not-yet-supported transport.
+   *
+   * @param stepNode the step's JSON node
+   * @param stepName the step's name, for the error message
+   * @return the declared transport, or HTTP when the field is absent
    */
   public static CallSpec.Transport parseTransport(JsonNode stepNode, String stepName) {
     if (!isPresent(stepNode, TRANSPORT)) {
@@ -75,74 +83,71 @@ public final class CallSpecCodec {
     try {
       transport = CallSpec.Transport.valueOf(value);
     } catch (IllegalArgumentException e) {
-      throw new SagaDefinitionException(
-          "Declarative service step '"
-              + stepName
-              + "' has invalid transport '"
-              + value
-              + "'; expected one of: "
-              + Arrays.toString(CallSpec.Transport.values()));
+      throw SagaDefinitionException.declarativeStepInvalid(
+          stepName, "invalid transport '" + value + "'");
     }
     if (transport != CallSpec.Transport.HTTP) {
-      throw new SagaDefinitionException(
-          "Declarative service step '"
-              + stepName
-              + "' transport '"
-              + transport
-              + "' is not yet supported");
+      throw SagaDefinitionException.declarativeStepInvalid(
+          stepName,
+          "transport '" + transport + "' not supported; expected " + CallSpec.Transport.HTTP);
     }
     return transport;
   }
 
-  /** Reads one phase's {@link CallSpec} for {@code transport} from its JSON node. */
+  /**
+   * Reads one phase's {@link CallSpec} for {@code transport} from its JSON node.
+   *
+   * @param transport the step's transport, as {@link #parseTransport} returned it
+   * @param node the phase's JSON node, an object holding the call's fields
+   * @param stepName the step's name, for the error message
+   * @return the parsed and validated call spec
+   */
   public static CallSpec parseCallSpec(
       CallSpec.Transport transport, JsonNode node, String stepName) {
     // Only HTTP is supported today; parseTransport rejects anything else first.
     if (transport != CallSpec.Transport.HTTP) {
-      throw new SagaDefinitionException(
-          "Declarative service step '"
-              + stepName
-              + "' transport '"
-              + transport
-              + "' is not yet supported");
+      throw SagaDefinitionException.declarativeStepInvalid(
+          stepName,
+          "transport '" + transport + "' not supported; expected " + CallSpec.Transport.HTTP);
     }
     node.fieldNames()
         .forEachRemaining(
             field -> {
               if (!KNOWN_HTTP_FIELDS.contains(field)) {
-                throw new SagaDefinitionException(
-                    "Declarative service step '"
-                        + stepName
-                        + "' call spec has unknown field '"
-                        + field
-                        + "'; expected one of: "
-                        + KNOWN_HTTP_FIELDS);
+                throw SagaDefinitionException.declarativeStepInvalid(
+                    stepName, "call spec has unknown field '" + field + "'");
               }
             });
     if (!isPresent(node, PATH)) {
-      throw new SagaDefinitionException(
-          "Declarative service step '" + stepName + "' call spec is missing 'path'");
+      throw SagaDefinitionException.declarativeStepInvalid(
+          stepName, "call spec is missing '" + PATH + "'");
     }
+    try {
+      return buildHttpCall(node, stepName);
+    } catch (IllegalArgumentException | IllegalStateException e) {
+      // A value the builder rejects: a blank path, a jsonBody value it cannot keep, or a body-less
+      // verb (GET/DELETE) that declares a request body. All are definition errors of this step.
+      throw SagaDefinitionException.declarativeStepInvalid(
+          stepName, "invalid call spec: " + (e.getMessage() != null ? e.getMessage() : "unknown"));
+    }
+  }
+
+  private static HttpCall buildHttpCall(JsonNode node, String stepName) {
     HttpCall.Builder callBuilder = HttpCall.newBuilder(node.get(PATH).asText());
     if (isPresent(node, METHOD)) {
       String method = node.get(METHOD).asText();
       try {
         callBuilder.method(HttpMethod.valueOf(method));
       } catch (IllegalArgumentException e) {
-        throw new SagaDefinitionException(
-            "Declarative service step '"
-                + stepName
-                + "' has invalid HTTP method '"
-                + method
-                + "'; expected one of: "
-                + Arrays.toString(HttpMethod.values()));
+        throw SagaDefinitionException.declarativeStepInvalid(
+            stepName, "invalid HTTP method '" + method + "'");
       }
     }
     if (isPresent(node, QUERY)) {
       callBuilder.query(readStringMap(node.get(QUERY), stepName, QUERY));
     }
     if (isPresent(node, JSON_BODY)) {
-      callBuilder.jsonBody(readStringMap(node.get(JSON_BODY), stepName, JSON_BODY));
+      callBuilder.jsonBody(readObjectMap(node.get(JSON_BODY), stepName));
     }
     if (isPresent(node, STRING_BODY)) {
       callBuilder.stringBody(node.get(STRING_BODY).asText());
@@ -159,19 +164,16 @@ public final class CallSpecCodec {
     if (isPresent(node, CALLBACK_TIMEOUT_MILLIS)) {
       callBuilder.callbackTimeoutMillis(node.get(CALLBACK_TIMEOUT_MILLIS).asLong());
     }
-    try {
-      return callBuilder.build();
-    } catch (IllegalStateException e) {
-      // e.g. a body-less verb (GET/DELETE) that declares a request body — a definition error.
-      throw new SagaDefinitionException(
-          "Declarative service step '"
-              + stepName
-              + "' has an invalid call spec: "
-              + e.getMessage());
-    }
+    return callBuilder.build();
   }
 
-  /** Writes {@code spec} as a JSON object — the inverse of {@link #parseCallSpec}. */
+  /**
+   * Writes {@code spec} as a JSON object — the inverse of {@link #parseCallSpec}.
+   *
+   * @param mapper the mapper that creates the node
+   * @param spec the call spec to write
+   * @return a JSON object holding only the fields the spec sets
+   */
   public static ObjectNode serializeCallSpec(ObjectMapper mapper, CallSpec spec) {
     ObjectNode node = mapper.createObjectNode();
     switch (spec) {
@@ -182,7 +184,7 @@ public final class CallSpecCodec {
           node.set(QUERY, toJsonMap(mapper, http.getQuery()));
         }
         if (!http.getJsonBody().isEmpty()) {
-          node.set(JSON_BODY, toJsonMap(mapper, http.getJsonBody()));
+          node.set(JSON_BODY, mapper.valueToTree(http.getJsonBody()));
         }
         if (http.getStringBody() != null) {
           node.put(STRING_BODY, http.getStringBody());
@@ -212,15 +214,22 @@ public final class CallSpecCodec {
 
   private static Map<String, String> readStringMap(JsonNode node, String stepName, String field) {
     if (!node.isObject()) {
-      throw new SagaDefinitionException(
-          "Declarative service step '"
-              + stepName
-              + "' field '"
-              + field
-              + "' must be a JSON object");
+      throw SagaDefinitionException.declarativeStepInvalid(
+          stepName, "field '" + field + "' must be a JSON object");
     }
     Map<String, String> map = new LinkedHashMap<>();
     node.fields().forEachRemaining(e -> map.put(e.getKey(), e.getValue().asText()));
+    return map;
+  }
+
+  /** Reads the body's fields as JSON values, keeping literal numbers, booleans and nesting. */
+  private static Map<String, ?> readObjectMap(JsonNode node, String stepName) {
+    if (!node.isObject()) {
+      throw SagaDefinitionException.declarativeStepInvalid(
+          stepName, "field '" + JSON_BODY + "' must be a JSON object");
+    }
+    @SuppressWarnings("unchecked")
+    Map<String, ?> map = MAPPER.convertValue(node, Map.class);
     return map;
   }
 
@@ -233,6 +242,11 @@ public final class CallSpecCodec {
    * rejecting a step that mixes a {@code stepClass} with {@code service}/phases or defines neither.
    * Shared by {@link SagaDefinitionParser} and the store serializer; each passes {@code error} so
    * the failure type matches its layer (a public definition error vs an internal one).
+   *
+   * @param stepNode the step's JSON node
+   * @param name the step's name, for the error message
+   * @param error builds the exception to throw from a message
+   * @return the step class name, or {@code null} for a service step
    */
   public static @Nullable String classStepOrNull(
       JsonNode stepNode, String name, Function<String, RuntimeException> error) {
@@ -253,7 +267,13 @@ public final class CallSpecCodec {
     return null;
   }
 
-  /** Rejects a SAGA-mode service step that carries TCC phases or omits a SAGA phase. */
+  /**
+   * Rejects a SAGA-mode service step that carries TCC phases or omits a SAGA phase.
+   *
+   * @param stepNode the step's JSON node
+   * @param name the step's name, for the error message
+   * @param error builds the exception to throw from a message
+   */
   public static void requireSagaPhases(
       JsonNode stepNode, String name, Function<String, RuntimeException> error) {
     if (hasTccPhase(stepNode)) {
@@ -271,7 +291,13 @@ public final class CallSpecCodec {
     }
   }
 
-  /** Rejects a TCC-mode service step that carries SAGA phases or omits a TCC phase. */
+  /**
+   * Rejects a TCC-mode service step that carries SAGA phases or omits a TCC phase.
+   *
+   * @param stepNode the step's JSON node
+   * @param name the step's name, for the error message
+   * @param error builds the exception to throw from a message
+   */
   public static void requireTccPhases(
       JsonNode stepNode, String name, Function<String, RuntimeException> error) {
     if (hasSagaPhase(stepNode)) {
@@ -298,6 +324,10 @@ public final class CallSpecCodec {
    * synchronously. This is a parse-path precheck (called by {@code SagaDefinitionParser}); the
    * {@code error} factory keeps the failure type layer-appropriate. The programmatic-builder and
    * store-reload paths are guarded independently by the {@code ServiceStep} constructor.
+   *
+   * @param stepNode the step's JSON node
+   * @param name the step's name, for the error message
+   * @param error builds the exception to throw from a message
    */
   public static void rejectAsyncOnBackwardPhase(
       JsonNode stepNode, String name, Function<String, RuntimeException> error) {
@@ -315,12 +345,23 @@ public final class CallSpecCodec {
     }
   }
 
-  /** Whether the step node declares any SAGA phase (execution/compensation). */
+  /**
+   * Whether the step node declares any SAGA phase (execution/compensation).
+   *
+   * @param stepNode the step's JSON node
+   * @return {@code true} if {@code execution} or {@code compensation} is present and not null
+   */
   public static boolean hasSagaPhase(JsonNode stepNode) {
     return isPresent(stepNode, EXECUTION) || isPresent(stepNode, COMPENSATION);
   }
 
-  /** Whether the step node declares any TCC phase (reservation/confirmation/cancellation). */
+  /**
+   * Whether the step node declares any TCC phase (reservation/confirmation/cancellation).
+   *
+   * @param stepNode the step's JSON node
+   * @return {@code true} if {@code reservation}, {@code confirmation} or {@code cancellation} is
+   *     present and not null
+   */
   public static boolean hasTccPhase(JsonNode stepNode) {
     return isPresent(stepNode, RESERVATION)
         || isPresent(stepNode, CONFIRMATION)

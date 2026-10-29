@@ -8,9 +8,10 @@ option java_outer_classname = "SagaProto";
 
 import "google/protobuf/timestamp.proto";
 
-// The gRPC rendering of the saga daemon's REST contract. Three unary RPCs delegating to the same
-// orchestrator as the REST routes. No streaming yet (a future WatchSaga adds push). Errors travel as
-// plain io.grpc.Status (no rich-error model); the duplicate-id conflict is ALREADY_EXISTS.
+// The gRPC rendering of the saga daemon's REST contract. Four unary RPCs delegating to the same
+// orchestrator as the REST routes. No streaming: a client waiting for an outcome long-polls
+// AwaitSaga. Errors travel as io.grpc.Status with a google.rpc.ErrorInfo naming the saga error
+// code; the duplicate-id conflict is ALREADY_EXISTS.
 service SagaService {
   // Starts a saga. `async=false` blocks for one bounded window (the gRPC analogue of REST's 202),
   // returning the terminal snapshot if it is reached within the window, else the in-flight
@@ -58,6 +59,9 @@ message GetSagaDetailRequest {
 message SagaDetail {
   SagaSnapshot saga = 1;
   repeated TimelineEvent timeline = 2;
+  // True when the timeline holds only the newest events because the saga's history exceeded the
+  // server's configured bound; the full history remains in the store.
+  bool truncated = 3;
 }
 
 // One event in a saga's timeline. Carries metadata plus the failure error or intervention reason

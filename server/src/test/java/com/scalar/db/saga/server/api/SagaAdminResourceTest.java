@@ -17,6 +17,7 @@ import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.engine.OperatorContext;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import com.scalar.db.saga.server.security.SagaAuthRequest;
 import com.scalar.db.saga.server.security.SagaAuthenticationException;
@@ -67,11 +68,16 @@ class SagaAdminResourceTest {
     when(orchestrator.adminService()).thenReturn(adminService);
     when(orchestrator.adminService(any(OperatorContext.class), anyLong())).thenReturn(adminService);
 
-    app = Javalin.create();
-    SagaSecurityHandler.register(app, new RoleHeaderProvider());
-    ErrorMapper.register(app);
-    SagaAdminResource.register(app, orchestrator, 1_000L);
-    app.start(0);
+    app =
+        Javalin.create(
+            cfg -> {
+              SagaSecurityHandler.register(cfg.routes, new RoleHeaderProvider());
+              ErrorMapper.register(cfg.routes);
+              SagaAdminResource.register(cfg.routes, orchestrator, 1_000L);
+            });
+    // Loopback, not the wildcard: a wildcard bind can share a port with another suite's
+    // loopback server, which then takes the connection and answers this test's requests.
+    app.start("127.0.0.1", 0);
   }
 
   @AfterEach
@@ -82,7 +88,7 @@ class SagaAdminResourceTest {
   }
 
   private static SagaStateSnapshot snapshot(SagaStatus status) {
-    return new SagaStateSnapshot(SAGA_ID, "order-saga", status, "owner", "v1", TS, TS);
+    return new SagaStateSnapshot(SAGA_ID, "order-saga", status, "v1", TS, TS);
   }
 
   // --- negative authorization (the priority surface) -------------------------
@@ -184,13 +190,11 @@ class SagaAdminResourceTest {
   @Test
   void recover_wrongState_returns422() throws Exception {
     when(adminService.recoverSaga(eq(SAGA_ID), any()))
-        .thenThrow(
-            new SagaStatePreconditionException(
-                SAGA_ID, SagaStatePreconditionException.Code.SAGA_WRONG_STATE, "wrong state"));
+        .thenThrow(SagaStatePreconditionException.wrongState(SAGA_ID, "RUNNING", "recover"));
     HttpResponse<String> response =
         send("POST", "/sagas/s1/recover", "admin", "{\"reason\":\"x\"}");
     assertThat(response.statusCode()).isEqualTo(422);
-    assertThat(response.body()).contains("SAGA_WRONG_STATE");
+    assertThat(response.body()).contains(SagaErrorCode.SAGA_WRONG_STATE.code());
   }
 
   @Test
@@ -223,12 +227,10 @@ class SagaAdminResourceTest {
   void reset_wrongState_returns422() throws Exception {
     // resetEscalated on a non-ESCALATED saga is a precondition failure, not transient
     when(adminService.resetEscalated(eq(SAGA_ID), any()))
-        .thenThrow(
-            new SagaStatePreconditionException(
-                SAGA_ID, SagaStatePreconditionException.Code.SAGA_WRONG_STATE, "not escalated"));
+        .thenThrow(SagaStatePreconditionException.wrongState(SAGA_ID, "RUNNING", "reset"));
     HttpResponse<String> response = send("POST", "/sagas/s1/reset", "admin", "{\"reason\":\"x\"}");
     assertThat(response.statusCode()).isEqualTo(422);
-    assertThat(response.body()).contains("SAGA_WRONG_STATE");
+    assertThat(response.body()).contains(SagaErrorCode.SAGA_WRONG_STATE.code());
   }
 
   @Test
@@ -283,6 +285,9 @@ class SagaAdminResourceTest {
     HttpResponse<String> response =
         send("POST", "/sagas/s1/recover", "admin", "{\"reason\":\"  \"}");
     assertThat(response.statusCode()).isEqualTo(400);
+    // INVALID_ARGUMENT, the enum's own example for a blank reason — the same code gRPC and
+    // embedded callers get, so the transports cannot drift apart on this input again.
+    assertThat(response.body()).contains(SagaErrorCode.INVALID_ARGUMENT.code());
   }
 
   @Test
@@ -292,6 +297,53 @@ class SagaAdminResourceTest {
     assertThat(response.statusCode()).isEqualTo(400);
   }
 
+  // The next three assert the response *detail*, not just the status. The status and code say
+  // only that something in the query was rejected; the detail names the bound and the offending
+  // value, which is what a remote caller cannot guess and cannot fix without.
+
+  @Test
+  void list_pageSizeAboveTheBound_returns400NamingTheBoundAndValue() throws Exception {
+    // Act
+    HttpResponse<String> response = send("GET", "/sagas?pageSize=9999", "admin", null);
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(400);
+    assertThat(response.body())
+        .contains(SagaErrorCode.INVALID_ARGUMENT.code())
+        .contains(String.valueOf(SagaQuery.MAX_PAGE_SIZE))
+        .contains("9999");
+  }
+
+  @Test
+  void list_emptyUpdatedAtWindow_returns400NamingBothBounds() throws Exception {
+    // Arrange — updatedAfter strictly after updatedBefore selects nothing
+    String path = "/sagas?updatedAfter=2026-07-18T11:00:00Z&updatedBefore=2026-07-18T10:00:00Z";
+
+    // Act
+    HttpResponse<String> response = send("GET", path, "admin", null);
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(400);
+    assertThat(response.body())
+        .contains(SagaErrorCode.INVALID_ARGUMENT.code())
+        .contains("2026-07-18T11:00:00Z")
+        .contains("2026-07-18T10:00:00Z");
+  }
+
+  @Test
+  void bulkReset_pageSizeAboveTheBound_returns400NamingTheBoundAndValue() throws Exception {
+    // Act — the sweep builds the same query from a JSON body rather than the query string
+    HttpResponse<String> response =
+        send("POST", "/admin/reset-escalated", "admin", "{\"reason\":\"sweep\",\"pageSize\":9999}");
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(400);
+    assertThat(response.body())
+        .contains(SagaErrorCode.INVALID_ARGUMENT.code())
+        .contains(String.valueOf(SagaQuery.MAX_PAGE_SIZE))
+        .contains("9999");
+  }
+
   private HttpResponse<String> send(
       String method, String path, @Nullable String role, @Nullable String body) throws Exception {
     HttpRequest.BodyPublisher publisher =
@@ -299,7 +351,7 @@ class SagaAdminResourceTest {
             ? HttpRequest.BodyPublishers.noBody()
             : HttpRequest.BodyPublishers.ofString(body);
     HttpRequest.Builder builder =
-        HttpRequest.newBuilder(URI.create("http://localhost:" + app.port() + path))
+        HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + app.port() + path))
             .method(method, publisher);
     if (body != null) {
       builder.header("Content-Type", "application/json");

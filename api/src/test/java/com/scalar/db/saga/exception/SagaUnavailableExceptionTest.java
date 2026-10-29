@@ -8,32 +8,27 @@ import org.junit.jupiter.api.Test;
 class SagaUnavailableExceptionTest {
 
   @Test
-  void constructor_messageGiven_setsMessage() {
+  void constructor_noArgsGiven_carriesServiceUnavailableCode() {
     // Arrange & Act
-    SagaUnavailableException e = new SagaUnavailableException("service unavailable");
+    SagaUnavailableException e = new SagaUnavailableException();
 
     // Assert
-    assertThat(e.getMessage()).isEqualTo("service unavailable");
-  }
-
-  @SuppressWarnings("NullAway")
-  @Test
-  void constructor_nullMessageGiven_throwsNullPointerException() {
-    // Arrange & Act & Assert
-    assertThatThrownBy(() -> new SagaUnavailableException(null))
-        .isInstanceOf(NullPointerException.class);
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.SERVICE_UNAVAILABLE);
+    assertThat(e.getMetadata()).isEmpty();
+    assertThat(e.getCause()).isNull();
   }
 
   @Test
-  void constructor_messageAndCauseGiven_setsBoth() {
+  void constructor_causeGiven_carriesServiceUnavailableCodeAndCause() {
     // Arrange
     RuntimeException cause = new RuntimeException("connect failed");
 
     // Act
-    SagaUnavailableException e = new SagaUnavailableException("service unavailable", cause);
+    SagaUnavailableException e = new SagaUnavailableException(cause);
 
     // Assert
-    assertThat(e.getMessage()).isEqualTo("service unavailable");
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.SERVICE_UNAVAILABLE);
+    assertThat(e.getMetadata()).isEmpty();
     assertThat(e.getCause()).isSameAs(cause);
   }
 
@@ -41,8 +36,20 @@ class SagaUnavailableExceptionTest {
   @Test
   void constructor_nullCauseGiven_throwsNullPointerException() {
     // Arrange & Act & Assert
-    assertThatThrownBy(() -> new SagaUnavailableException("service unavailable", null))
+    assertThatThrownBy(() -> new SagaUnavailableException(null))
         .isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void always_carriesServiceUnavailableOnly() {
+    // The two public constructors are the only construction path, so this type cannot carry
+    // PERSISTENCE_STORE_UNAVAILABLE. A transient store failure reconstructs as
+    // SagaPersistenceException instead, which is why callers key on the retryable category rather
+    // than on this type alone.
+    assertThat(new SagaUnavailableException().getErrorCode())
+        .isEqualTo(SagaErrorCode.SERVICE_UNAVAILABLE);
+    assertThat(new SagaUnavailableException(new RuntimeException("x")).getErrorCode())
+        .isEqualTo(SagaErrorCode.SERVICE_UNAVAILABLE);
   }
 
   @Test

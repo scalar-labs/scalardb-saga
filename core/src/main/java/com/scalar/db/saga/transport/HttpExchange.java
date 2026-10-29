@@ -1,6 +1,7 @@
 package com.scalar.db.saga.transport;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.net.ConnectException;
@@ -27,8 +28,10 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Flow;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 import javax.net.ssl.SSLHandshakeException;
 import org.jspecify.annotations.Nullable;
 
@@ -38,7 +41,9 @@ import org.jspecify.annotations.Nullable;
  * classification (including the {@code X-Saga-Retryable} override), and {@link OutboundHttpPolicy}
  * (SSRF allowlist + body limits). Keeping it in one place means all front-ends behave identically.
  * Response decoding lives in {@link HttpCallResponse}. The per-request timeout may be supplied per
- * call so the single shared, immutable instance can honor each step's remaining deadline.
+ * call so the single shared instance can honor each step's remaining deadline; the only mutable
+ * state is the swappable default-header set and the retirement flag, both owned by configuration
+ * swaps.
  *
  * <p>Endpoint default headers (set on the {@code httpEndpoint(...)} sub-builder, never persisted in
  * a definition — the channel for auth/secrets) are applied to every request through this exchange,
@@ -56,7 +61,14 @@ final class HttpExchange {
   private final ObjectMapper mapper;
   private final OutboundHttpPolicy policy;
   private final Duration timeout;
-  private final Map<String, String> defaultHeaders;
+
+  // Read once per request so a configuration swap can rotate a secret on the live endpoint as a
+  // value change, with no client or connection churn. Every other field stays immutable.
+  private final AtomicReference<Map<String, String>> defaultHeaders;
+
+  // Flipped when the endpoint owning this exchange is replaced or removed by a configuration
+  // swap: subsequent requests fail pre-send as retryable, to be re-resolved against the new set.
+  private volatile boolean retired;
 
   HttpExchange(HttpClient client, OutboundHttpPolicy policy) {
     this(client, hardenedMapper(), policy, DEFAULT_TIMEOUT, Map.of());
@@ -76,7 +88,24 @@ final class HttpExchange {
     this.mapper = Objects.requireNonNull(mapper, "mapper must not be null");
     this.policy = Objects.requireNonNull(policy, "policy must not be null");
     this.timeout = Objects.requireNonNull(timeout, "timeout must not be null");
-    this.defaultHeaders = Map.copyOf(defaultHeaders);
+    this.defaultHeaders = new AtomicReference<>(Map.copyOf(defaultHeaders));
+  }
+
+  /**
+   * Replaces the endpoint default headers applied to every subsequent request. The channel for
+   * secret rotation without endpoint churn: a request already being built keeps the set it read.
+   */
+  void updateDefaultHeaders(Map<String, String> headers) {
+    defaultHeaders.set(Map.copyOf(headers));
+  }
+
+  /**
+   * Marks this exchange's endpoint as retired by a configuration swap: every subsequent request
+   * fails pre-send as retryable with {@code knownNotCommitted}, so the caller's retry re-resolves
+   * against the new endpoint set. In-flight requests are unaffected.
+   */
+  void markRetired() {
+    retired = true;
   }
 
   /**
@@ -128,6 +157,12 @@ final class HttpExchange {
       String stepName,
       @Nullable Duration requestTimeout)
       throws HttpCallException {
+    if (retired) {
+      // Pre-send by construction — the check precedes any request construction — and retryable:
+      // the retry's resolution sees the endpoint set that replaced this one.
+      throw new HttpCallException(
+          "Endpoint retired by a configuration swap: " + baseUrl, null, true, true);
+    }
     URI uri = buildUri(baseUrl, path, queryParams);
     if (!policy.isAllowed(uri)) {
       throw new HttpCallException(
@@ -152,7 +187,7 @@ final class HttpExchange {
       // header() appends rather than replaces: applying a framework header after the map would add
       // a second value alongside an endpoint default of the same name, not win over it.
       Map<String, String> merged = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-      merged.putAll(defaultHeaders);
+      merged.putAll(defaultHeaders.get());
       for (Map.Entry<String, String> header : headers) {
         merged.put(header.getKey(), header.getValue());
       }
@@ -186,8 +221,19 @@ final class HttpExchange {
     // mid-body stall included), read the body via sendAsync and impose effectiveTimeout as a hard
     // deadline on the future, cancelling the in-flight request if it elapses. The limitedBytes
     // subscriber still caps the buffered body at maxBodyBytes.
-    CompletableFuture<HttpResponse<byte[]>> future =
-        client.sendAsync(httpRequest, limitedBytes(maxBodyBytes));
+    CompletableFuture<HttpResponse<byte[]>> future;
+    try {
+      future = client.sendAsync(httpRequest, limitedBytes(maxBodyBytes));
+    } catch (RejectedExecutionException e) {
+      // A submission the client refused at the door: in practice a caller-supplied client whose
+      // executor is saturated or shut down. Retirement does not land here; a client shut down by
+      // a swap still accepts the submission and fails the future with IOException (observed on
+      // JDK 21 and not re-checked since), and the pre-send retired check above covers
+      // post-retirement submissions anyway.
+      // The rejected request never left the process — proven pre-send, retryable.
+      throw new HttpCallException(
+          "HTTP client rejected the request (shut down): " + uri, e, true, true);
+    }
     HttpResponse<byte[]> response;
     try {
       response = future.get(effectiveTimeout.toMillis(), TimeUnit.MILLISECONDS);
@@ -198,6 +244,17 @@ final class HttpExchange {
       Throwable cause = e.getCause();
       if (cause != null && hasCause(cause, BodyTooLargeException.class)) {
         throw new HttpCallException("Response body exceeds limit (> " + maxBodyBytes + ")", false);
+      }
+      if (cause != null && hasCause(cause, RejectedExecutionException.class)) {
+        // Unlike the synchronous rejection above, a rejection surfacing through the future is not
+        // proof of pre-send: the client accepted the request, and an executor shut down (or a
+        // bounded queue overflowing) mid-exchange can reject continuation work such as response
+        // processing after the request was transmitted. Retryable, but in-doubt.
+        throw new HttpCallException(
+            "HTTP call rejected mid-exchange (client or executor shut down or saturated): " + uri,
+            cause,
+            true,
+            false);
       }
       if (cause != null && hasCause(cause, NumberFormatException.class)) {
         // A malformed Content-Length (e.g. "abc") makes the JDK reject the response while framing
@@ -286,7 +343,9 @@ final class HttpExchange {
 
     @Override
     public CompletionStage<byte[]> getBody() {
-      return body;
+      // A restricted view: the interface hands this stage to the HTTP client, which must not be
+      // able to complete the subscriber's own future.
+      return body.minimalCompletionStage();
     }
 
     @Override
@@ -355,6 +414,9 @@ final class HttpExchange {
   private static final class BodyTooLargeException extends IOException {}
 
   /** Returns whether {@code type} appears anywhere in {@code throwable}'s cause chain. */
+  // The self-cause guard wants object identity, not equality: it detects a throwable that is
+  // literally its own cause, which would otherwise spin the walk forever.
+  @SuppressWarnings("ReferenceEquality")
   private static boolean hasCause(Throwable throwable, Class<? extends Throwable> type) {
     for (Throwable cause = throwable; cause != null; cause = cause.getCause()) {
       if (type.isInstance(cause)) {
@@ -427,6 +489,9 @@ final class HttpExchange {
     ObjectMapper objectMapper = new ObjectMapper();
     // Defense in depth against polymorphic-deserialization gadgets (off by default in Jackson 2.x).
     objectMapper.deactivateDefaultTyping();
+    // Response decimals read exactly, as the saga context and the stored saga state keep them, so a
+    // captured value has the same type before and after the saga is reloaded.
+    objectMapper.enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
     return objectMapper;
   }
 }

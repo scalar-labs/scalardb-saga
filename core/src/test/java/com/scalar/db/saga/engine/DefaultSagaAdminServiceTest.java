@@ -21,6 +21,8 @@ import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.definition.SagaDefinition.RecoveryStrategy;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaErrorCode;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
@@ -100,7 +102,7 @@ class DefaultSagaAdminServiceTest {
   }
 
   private static SagaStateSnapshot snapshot(SagaStatus status) {
-    return new SagaStateSnapshot(SAGA_ID, SAGA_NAME, status, "owner", DEF_VERSION, TS, TS);
+    return new SagaStateSnapshot(SAGA_ID, SAGA_NAME, status, DEF_VERSION, TS, TS);
   }
 
   private ArgumentCaptor<StatusEvent> stubDrive(SagaStateSnapshot before, List<SagaEvent> events) {
@@ -126,8 +128,8 @@ class DefaultSagaAdminServiceTest {
     // Act & Assert
     assertThatThrownBy(() -> service.recoverSaga(SAGA_ID, "why"))
         .isInstanceOf(SagaStatePreconditionException.class)
-        .extracting(e -> ((SagaStatePreconditionException) e).getCode())
-        .isEqualTo(SagaStatePreconditionException.Code.SAGA_WRONG_STATE);
+        .extracting(e -> ((SagaStatePreconditionException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.SAGA_WRONG_STATE);
     verify(engine, never()).recover(any(), any(), any());
   }
 
@@ -139,8 +141,8 @@ class DefaultSagaAdminServiceTest {
     // Act & Assert
     assertThatThrownBy(() -> service.recoverSaga(SAGA_ID, "why"))
         .isInstanceOf(SagaStatePreconditionException.class)
-        .extracting(e -> ((SagaStatePreconditionException) e).getCode())
-        .isEqualTo(SagaStatePreconditionException.Code.SAGA_PARKED);
+        .extracting(e -> ((SagaStatePreconditionException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.SAGA_PARKED);
   }
 
   @Test
@@ -293,8 +295,8 @@ class DefaultSagaAdminServiceTest {
     // Act & Assert
     assertThatThrownBy(() -> service.forceComplete(SAGA_ID, "why"))
         .isInstanceOf(SagaStatePreconditionException.class)
-        .extracting(e -> ((SagaStatePreconditionException) e).getCode())
-        .isEqualTo(SagaStatePreconditionException.Code.SAGA_WRONG_STATE);
+        .extracting(e -> ((SagaStatePreconditionException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.SAGA_WRONG_STATE);
   }
 
   // ---------------------------------------------------------------------------
@@ -371,22 +373,22 @@ class DefaultSagaAdminServiceTest {
   // ---------------------------------------------------------------------------
 
   @Test
-  void resetEscalated_bulkConflictingStatusFilter_throwsIllegalArgument() {
+  void resetEscalated_bulkConflictingStatusFilter_throwsSagaIllegalArgument() {
     // Arrange
     SagaQuery query = SagaQuery.newBuilder().status(SagaStatus.RUNNING).build();
 
     // Act & Assert
     assertThatThrownBy(() -> service.resetEscalated(query, "why"))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class);
   }
 
   @Test
   void resetEscalated_bulkMixedOutcomes_countsResetAndSkipped() {
     // Arrange — one resettable saga + one with an unresolvable definition
     SagaStateSnapshot ok =
-        new SagaStateSnapshot("ok", SAGA_NAME, SagaStatus.ESCALATED, "o", DEF_VERSION, TS, TS);
+        new SagaStateSnapshot("ok", SAGA_NAME, SagaStatus.ESCALATED, DEF_VERSION, TS, TS);
     SagaStateSnapshot noDef =
-        new SagaStateSnapshot("nodef", "gone", SagaStatus.ESCALATED, "o", "v9", TS, TS);
+        new SagaStateSnapshot("nodef", "gone", SagaStatus.ESCALATED, "v9", TS, TS);
     when(store.listStateSnapshots(any()))
         .thenReturn(new SagaPage<>(List.of(ok, noDef), "next-token"));
     List<SagaEvent> events =
@@ -416,7 +418,7 @@ class DefaultSagaAdminServiceTest {
   void resetEscalated_bulkLostCasRace_countsAsSkipped() {
     // Arrange — the row changed under us; the co-committed transition throws the CAS-lost exception
     SagaStateSnapshot racing =
-        new SagaStateSnapshot("race", SAGA_NAME, SagaStatus.ESCALATED, "o", DEF_VERSION, TS, TS);
+        new SagaStateSnapshot("race", SAGA_NAME, SagaStatus.ESCALATED, DEF_VERSION, TS, TS);
     when(store.listStateSnapshots(any())).thenReturn(new SagaPage<>(List.of(racing), null));
     List<SagaEvent> events =
         List.of(StatusEvent.started(null), StepEvent.completed(0, "debit", null));
@@ -442,15 +444,14 @@ class DefaultSagaAdminServiceTest {
     // Arrange — "bad" cannot be read back at all; "ok" is healthy and ordered after it. A reset
     // saga leaves the ESCALATED scan, so aborting on "bad" would strand "ok" on every re-run too.
     SagaStateSnapshot bad =
-        new SagaStateSnapshot("bad", SAGA_NAME, SagaStatus.ESCALATED, "o", DEF_VERSION, TS, TS);
+        new SagaStateSnapshot("bad", SAGA_NAME, SagaStatus.ESCALATED, DEF_VERSION, TS, TS);
     SagaStateSnapshot ok =
-        new SagaStateSnapshot("ok", SAGA_NAME, SagaStatus.ESCALATED, "o", DEF_VERSION, TS, TS);
+        new SagaStateSnapshot("ok", SAGA_NAME, SagaStatus.ESCALATED, DEF_VERSION, TS, TS);
     when(store.listStateSnapshots(any())).thenReturn(new SagaPage<>(List.of(bad, ok), null));
     when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(backwardDef());
     when(store.getEvents("bad"))
         .thenThrow(
-            SagaPersistenceException.nonRetryable(
-                "Unknown event type: SAGA_FROM_THE_FUTURE", new IllegalArgumentException("boom")));
+            SagaPersistenceException.deserializationFailed(new IllegalArgumentException("boom")));
     when(store.getEvents("ok"))
         .thenReturn(List.of(StatusEvent.started(null), StepEvent.completed(0, "debit", null)));
     when(store.recordStatusEvent(eq(ok), anyInt(), any(), any(), eq(Instant.EPOCH))).thenReturn(ok);
@@ -475,12 +476,11 @@ class DefaultSagaAdminServiceTest {
     // Arrange — the saga's stored definition cannot be decoded, so resolve throws non-retryably.
     // That is not a store outage: the sweep must skip this one saga, not abort on the whole page.
     SagaStateSnapshot bad =
-        new SagaStateSnapshot("bad", SAGA_NAME, SagaStatus.ESCALATED, "o", DEF_VERSION, TS, TS);
+        new SagaStateSnapshot("bad", SAGA_NAME, SagaStatus.ESCALATED, DEF_VERSION, TS, TS);
     when(store.listStateSnapshots(any())).thenReturn(new SagaPage<>(List.of(bad), null));
     when(registry.resolve(SAGA_NAME, DEF_VERSION))
         .thenThrow(
-            SagaPersistenceException.nonRetryable(
-                "Failed to deserialize definition", new IllegalArgumentException("boom")));
+            SagaPersistenceException.deserializationFailed(new IllegalArgumentException("boom")));
 
     // Act
     ResetResult result = service.resetEscalated(SagaQuery.newBuilder().build(), "sweep");
@@ -499,13 +499,12 @@ class DefaultSagaAdminServiceTest {
     // Arrange — the store is failing, not this saga. Every remaining row would fail the same way,
     // so the sweep must surface it instead of reporting a page of misleading skips.
     SagaStateSnapshot down =
-        new SagaStateSnapshot("down", SAGA_NAME, SagaStatus.ESCALATED, "o", DEF_VERSION, TS, TS);
+        new SagaStateSnapshot("down", SAGA_NAME, SagaStatus.ESCALATED, DEF_VERSION, TS, TS);
     when(store.listStateSnapshots(any())).thenReturn(new SagaPage<>(List.of(down), null));
     when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(backwardDef());
     when(store.getEvents("down"))
         .thenThrow(
-            SagaPersistenceException.retryable(
-                "store unavailable", new IllegalStateException("conn refused")));
+            SagaPersistenceException.storeUnavailable(new IllegalStateException("conn refused")));
 
     // Act & Assert
     assertThatThrownBy(() -> service.resetEscalated(SagaQuery.newBuilder().build(), "sweep"))
@@ -517,20 +516,24 @@ class DefaultSagaAdminServiceTest {
   // ---------------------------------------------------------------------------
 
   @Test
-  void recoverSaga_blankReason_throwsIllegalArgument() {
-    // Act & Assert — validated before any store interaction
+  void recoverSaga_blankReason_throwsSagaIllegalArgument() {
+    // Act & Assert — validated before any store interaction. The point of the typed exception is
+    // that the embedded caller reaches the same error code a remote caller reconstructs from the
+    // wire, so assert the code and not just the type.
     assertThatThrownBy(() -> service.recoverSaga(SAGA_ID, "   "))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class)
+        .extracting(e -> ((SagaIllegalArgumentException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.INVALID_ARGUMENT);
   }
 
   @Test
-  void recoverSaga_tooLongReason_throwsIllegalArgument() {
+  void recoverSaga_tooLongReason_throwsSagaIllegalArgument() {
     // Arrange
     String longReason = "x".repeat(1025);
 
     // Act & Assert
     assertThatThrownBy(() -> service.recoverSaga(SAGA_ID, longReason))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class);
   }
 
   @Test
@@ -731,7 +734,7 @@ class DefaultSagaAdminServiceTest {
   void recoverSaga_withDriveDeadline_driveThrows_surfacesTheDrivesOwnException() {
     // Arrange
     arrangeDrivableSaga();
-    doThrow(SagaPersistenceException.retryable("store died", new RuntimeException("io")))
+    doThrow(SagaPersistenceException.storeUnavailable(new RuntimeException("io")))
         .when(engine)
         .recover(any(), any(), any());
 
@@ -739,7 +742,8 @@ class DefaultSagaAdminServiceTest {
     // cause is unwrapped from the ExecutionException the executor wraps it in
     assertThatThrownBy(() -> boundedService(5_000L).recoverSaga(SAGA_ID, "why"))
         .isInstanceOf(SagaPersistenceException.class)
-        .hasMessage("store died");
+        .extracting(e -> ((SagaPersistenceException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE);
   }
 
   @Test

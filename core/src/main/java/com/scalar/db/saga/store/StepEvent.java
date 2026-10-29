@@ -44,38 +44,87 @@ public final class StepEvent implements SagaEvent {
    * Creates a {@link EventType#STEP_PENDING} event, marking that a forward step has parked on an
    * async callback ({@code RUNNING → WAITING}). Carries no payload — the step's output arrives
    * later with the {@link EventType#STEP_COMPLETED} event when the callback resumes it.
+   *
+   * @param stepIndex the step's zero-based index in the definition, never negative
+   * @param stepName the step's name
+   * @return the event
    */
   public static StepEvent pending(int stepIndex, String stepName) {
     return new StepEvent(EventType.STEP_PENDING, stepIndex, stepName, null, null);
   }
 
   /**
-   * Creates a {@link EventType#STEP_REISSUING} event, marking that the recovery sweep un-parked a
-   * timed-out async step to re-issue its call ({@code WAITING → RUNNING}). Like {@link #pending},
-   * it carries no payload and is folded to a no-op on replay; the subsequent re-park appends a
-   * fresh {@link EventType#STEP_PENDING}. The count of {@code STEP_PENDING} events bounds the
-   * re-drive attempts.
+   * Creates a {@link EventType#STEP_REISSUING} event with no payload, marking that a timed-out
+   * async step was un-parked to re-issue its call ({@code WAITING → RUNNING}). It is folded to a
+   * no-op on replay; the subsequent re-park appends a fresh {@link EventType#STEP_PENDING}. The
+   * count of {@code STEP_PENDING} events bounds the re-drive attempts.
+   *
+   * @param stepIndex the step's zero-based index in the definition, never negative
+   * @param stepName the step's name
+   * @return the event
    */
   public static StepEvent reissuing(int stepIndex, String stepName) {
-    return new StepEvent(EventType.STEP_REISSUING, stepIndex, stepName, null, null);
+    return reissuing(stepIndex, stepName, null);
   }
 
-  /** Creates a {@link EventType#STEP_COMPLETED} event. */
+  /**
+   * Creates a {@link EventType#STEP_REISSUING} event that records why the step is re-issued, as
+   * when its participant reported a retryable failure. Still folded to a no-op on replay: the
+   * payload is a serialized error for the timeline, in the form a {@link EventType#STEP_FAILED}
+   * payload takes, and never a step output.
+   *
+   * @param stepIndex the step's zero-based index in the definition, never negative
+   * @param stepName the step's name
+   * @param payload the serialized error that caused the re-issue, or {@code null}
+   * @return the event
+   */
+  public static StepEvent reissuing(int stepIndex, String stepName, @Nullable String payload) {
+    return new StepEvent(EventType.STEP_REISSUING, stepIndex, stepName, payload, null);
+  }
+
+  /**
+   * Creates a {@link EventType#STEP_COMPLETED} event.
+   *
+   * @param stepIndex the step's zero-based index in the definition, never negative
+   * @param stepName the step's name
+   * @param payload the step's serialized output, or {@code null}
+   * @return the event
+   */
   public static StepEvent completed(int stepIndex, String stepName, @Nullable String payload) {
     return new StepEvent(EventType.STEP_COMPLETED, stepIndex, stepName, payload, null);
   }
 
-  /** Creates a {@link EventType#STEP_FAILED} event. */
+  /**
+   * Creates a {@link EventType#STEP_FAILED} event.
+   *
+   * @param stepIndex the step's zero-based index in the definition, never negative
+   * @param stepName the step's name
+   * @param payload the serialized failure, or {@code null}
+   * @return the event
+   */
   public static StepEvent failed(int stepIndex, String stepName, @Nullable String payload) {
     return new StepEvent(EventType.STEP_FAILED, stepIndex, stepName, payload, null);
   }
 
-  /** Creates a {@link EventType#STEP_COMPENSATED} event. */
+  /**
+   * Creates a {@link EventType#STEP_COMPENSATED} event.
+   *
+   * @param stepIndex the step's zero-based index in the definition, never negative
+   * @param stepName the step's name
+   * @return the event
+   */
   public static StepEvent compensated(int stepIndex, String stepName) {
     return new StepEvent(EventType.STEP_COMPENSATED, stepIndex, stepName, null, null);
   }
 
-  /** Creates a {@link EventType#STEP_COMPENSATION_FAILED} event. */
+  /**
+   * Creates a {@link EventType#STEP_COMPENSATION_FAILED} event.
+   *
+   * @param stepIndex the step's zero-based index in the definition, never negative
+   * @param stepName the step's name
+   * @param payload the serialized failure, or {@code null}
+   * @return the event
+   */
   public static StepEvent compensationFailed(
       int stepIndex, String stepName, @Nullable String payload) {
     return new StepEvent(EventType.STEP_COMPENSATION_FAILED, stepIndex, stepName, payload, null);
@@ -90,12 +139,20 @@ public final class StepEvent implements SagaEvent {
     return eventType;
   }
 
-  /** Returns the step index (always {@code >= 0}). */
+  /**
+   * Returns the step index (always {@code >= 0}).
+   *
+   * @return the step's zero-based index in the definition
+   */
   public int getStepIndex() {
     return stepIndex;
   }
 
-  /** Returns the step name. */
+  /**
+   * Returns the step name.
+   *
+   * @return the step's name
+   */
   public String getStepName() {
     return stepName;
   }
@@ -110,7 +167,12 @@ public final class StepEvent implements SagaEvent {
     return timestamp;
   }
 
-  /** Returns a new {@code StepEvent} with the given timestamp set. */
+  /**
+   * Returns a new {@code StepEvent} with the given timestamp set.
+   *
+   * @param timestamp the store's timestamp for the event
+   * @return a copy of this event carrying the timestamp
+   */
   public StepEvent withTimestamp(Instant timestamp) {
     Objects.requireNonNull(timestamp, "timestamp must not be null");
     return new StepEvent(eventType, stepIndex, stepName, payload, timestamp);

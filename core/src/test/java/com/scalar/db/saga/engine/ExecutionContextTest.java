@@ -18,7 +18,7 @@ class ExecutionContextTest {
 
   private static final Instant NOW = Instant.now();
   private static final SagaStateSnapshot DEFAULT_STATE =
-      new SagaStateSnapshot("saga-1", "test-saga", SagaStatus.RUNNING, "owner-1", "v1", NOW, NOW);
+      new SagaStateSnapshot("saga-1", "test-saga", SagaStatus.RUNNING, "v1", NOW, NOW);
 
   private ExecutionContext createContext() {
     return new ExecutionContext("saga-1", new HashMap<>(), DEFAULT_STATE);
@@ -406,8 +406,7 @@ class ExecutionContextTest {
     // Arrange
     ExecutionContext ctx = createContext();
     SagaStateSnapshot newState =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.COMPENSATING, "owner-1", "v1", NOW, NOW);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.COMPENSATING, "v1", NOW, NOW);
 
     // Act
     ctx.setCurrentState(newState);
@@ -540,6 +539,10 @@ class ExecutionContextTest {
     Map<String, Object> input = Map.of("bad", new Object());
 
     // Act & Assert
+    // Stdlib, not SagaIllegalArgumentException: validateType is shared with put and merge, which
+    // run over store-read input and over a participant's reply, where a rejection is a server
+    // fault. The entry points that know the map is a caller's convert it themselves — createSaga
+    // for a saga's input, resumeParked for a callback's output.
     assertThatThrownBy(() -> new ExecutionContext("saga-1", input, DEFAULT_STATE))
         .isInstanceOf(IllegalArgumentException.class);
   }

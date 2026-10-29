@@ -1,0 +1,84 @@
+name: Push the server image
+description: >-
+  Builds the server image for linux/amd64 and linux/arm64 from a checked-out tree and pushes it to
+  ghcr.io. Shared by release.yml and release-snapshot.yml; tag derivation, signing and job ordering
+  stay with the caller.
+
+inputs:
+  tags:
+    description: The image references to push, one per line
+    required: true
+  version:
+    description: The version recorded in the image's labels
+    required: true
+  attest:
+    description: Attach an SBOM and a max-detail provenance attestation ("true" or "false")
+    required: true
+  gradle-cache-disabled:
+    description: Build without the Gradle cache ("true" or "false")
+    default: "false"
+  registry-token:
+    description: A token with packages:write on ghcr.io, normally the job's GITHUB_TOKEN
+    required: true
+
+outputs:
+  digest:
+    description: The digest of the pushed image index
+    value: ${{ steps.build.outputs.digest }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Java 25
+      uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+      with:
+        distribution: temurin
+        java-version: 25
+
+    - name: Set up Gradle
+      uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+      with:
+        cache-disabled: ${{ inputs.gradle-cache-disabled }}
+
+    # Gradle builds the distribution and assembles the context; Docker only packages it. Building
+    # inside the Dockerfile instead would re-resolve every dependency per architecture and throw
+    # away the Gradle cache this runner already has.
+    - name: Assemble the Docker build context
+      shell: bash
+      run: ./gradlew :server:dockerContext
+
+    # The arm64 leg has to execute the Dockerfile's apt and useradd steps, which are native
+    # instructions — hence emulation. The payload itself is architecture-independent Java, so this
+    # only pays for a handful of package operations. If the emulated leg becomes slow enough to
+    # matter, the faster arrangement is a matrix over ubuntu-latest and ubuntu-24.04-arm that pushes
+    # by digest, plus a job that merges them into one manifest list.
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+    - name: Set up Buildx
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+    - name: Log in to ghcr.io
+      uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ inputs.registry-token }}
+
+    # With attest, an SBOM and a max-detail provenance attestation are attached to the image in the
+    # registry, which lets a consumer answer "what is in this image and what built it" without
+    # trusting a separate document. Without it both are off, stated explicitly because
+    # build-push-action attaches a provenance attestation by default.
+    - name: Build and push
+      id: build
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      with:
+        context: server/build/docker
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ inputs.tags }}
+        build-args: |
+          IMAGE_VERSION=${{ inputs.version }}
+          IMAGE_REVISION=${{ github.sha }}
+        sbom: ${{ inputs.attest }}
+        provenance: ${{ inputs.attest == 'true' && 'mode=max' || 'false' }}

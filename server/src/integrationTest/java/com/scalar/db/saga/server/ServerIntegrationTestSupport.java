@@ -1,11 +1,14 @@
 package com.scalar.db.saga.server;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.scalar.db.saga.integration.IntegrationTestStore;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.UncheckedIOException;
+import java.io.Writer;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -17,6 +20,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
@@ -48,6 +52,10 @@ abstract class ServerIntegrationTestSupport {
   private HttpServer participant;
   private Path tempDbPath;
   private Path definitionsDir;
+  private Path servicesDir;
+  private Path secretsDir;
+  private String participantBaseUrl;
+  private Properties serverProperties;
   private SagaServer server;
 
   @BeforeEach
@@ -56,24 +64,36 @@ abstract class ServerIntegrationTestSupport {
     configureParticipant(participant);
     participant.start();
     String baseUrl = "http://localhost:" + participant.getAddress().getPort();
+    this.participantBaseUrl = baseUrl;
 
     tempDbPath = Files.createTempFile("saga-daemon-it-", ".db");
     definitionsDir = Files.createTempDirectory("saga-daemon-it-defs-");
     writeDefinitions(definitionsDir);
+    servicesDir = Files.createTempDirectory("saga-daemon-it-services-");
+    secretsDir = Files.createTempDirectory("saga-daemon-it-secrets-");
+    Map<String, Properties> services = new LinkedHashMap<>();
+    Properties baseService = new Properties();
+    baseService.setProperty("base_url", baseUrl);
+    services.put(SERVICE, baseService);
+    configureServices(services);
+    for (Map.Entry<String, Properties> service : services.entrySet()) {
+      try (Writer writer =
+          Files.newBufferedWriter(
+              servicesDir.resolve(service.getKey() + ".properties"), StandardCharsets.UTF_8)) {
+        service.getValue().store(writer, null);
+      }
+    }
 
-    Properties props = new Properties();
-    props.setProperty("scalar.db.storage", "jdbc");
-    props.setProperty(
-        "scalar.db.contact_points",
-        "jdbc:sqlite:" + tempDbPath.toAbsolutePath() + "?busy_timeout=10000");
-    props.setProperty("scalar.db.saga.store.num_buckets", "1");
+    serverProperties = new Properties();
+    Properties props = serverProperties;
+    IntegrationTestStore.configure(props, tempDbPath);
+    props.setProperty("scalar.db.saga.store.scalardb.num_buckets", "1");
     props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, definitionsDir.toString());
-    props.setProperty(
-        SagaServerConfig.SERVICE_KEY_PREFIX + SERVICE + SagaServerConfig.SERVICE_BASE_URL_SUFFIX,
-        baseUrl);
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, servicesDir.toString());
+    props.setProperty(SagaServerConfig.SECRETS_ROOT_KEY, secretsDir.toString());
     configureProperties(props);
 
     server = new SagaServer(SagaServerConfig.load(props)).start();
@@ -88,6 +108,8 @@ abstract class ServerIntegrationTestSupport {
       participant.stop(0);
     }
     deleteRecursively(definitionsDir);
+    deleteRecursively(servicesDir);
+    deleteRecursively(secretsDir);
     if (tempDbPath != null) {
       Files.deleteIfExists(tempDbPath);
     }
@@ -96,6 +118,11 @@ abstract class ServerIntegrationTestSupport {
   /** The actual bound gRPC port (ephemeral). Only meaningful after the server has started. */
   protected final int grpcPort() {
     return server.grpcPort();
+  }
+
+  /** The actual bound HTTP port (ephemeral). Only meaningful after the server has started. */
+  protected final int httpPort() {
+    return server.port();
   }
 
   /** Registers the participant's HTTP endpoints — the services a definition's steps call. */
@@ -108,7 +135,74 @@ abstract class ServerIntegrationTestSupport {
    * Hook for a subclass to add or override server properties before the server starts (no-op by
    * default).
    */
-  protected void configureProperties(Properties props) {}
+  protected void configureProperties(Properties props) throws IOException {}
+
+  /**
+   * Adjusts the service files written to {@code services_path} before the server starts. The map
+   * arrives holding {@value #SERVICE} with its {@code base_url} pointing at the participant; mutate
+   * it or add further services (prefix-free keys, as the files carry them).
+   */
+  protected void configureServices(Map<String, Properties> services) {}
+
+  /** The participant's base URL, for reload tests writing service files that point at it. */
+  protected final String participantBaseUrl() {
+    return participantBaseUrl;
+  }
+
+  /** The live services directory; reload tests mutate it and then call {@link #reloadNow()}. */
+  protected final Path servicesDir() {
+    return servicesDir;
+  }
+
+  /** The live definitions directory; reload tests mutate it and then call {@link #reloadNow()}. */
+  protected final Path definitionsDir() {
+    return definitionsDir;
+  }
+
+  /** The secrets root service-file {@code ${file:...}} references must resolve inside. */
+  protected final Path secretsDir() {
+    return secretsDir;
+  }
+
+  /** Writes (or overwrites) one service file in the live services directory. */
+  protected final void writeService(String name, Properties service) throws IOException {
+    try (Writer writer =
+        Files.newBufferedWriter(
+            servicesDir.resolve(name + ".properties"), StandardCharsets.UTF_8)) {
+      service.store(writer, null);
+    }
+  }
+
+  /**
+   * Stops the running server and starts a fresh one against the same directories and store — a cold
+   * boot of whatever state the watched directories are in right now.
+   */
+  protected final void restartServer() {
+    server.close();
+    server = new SagaServer(SagaServerConfig.load(serverProperties)).start();
+  }
+
+  /**
+   * Runs one reload pass synchronously — deterministic reload for tests, instead of waiting out the
+   * interval.
+   *
+   * @return whether the pass applied (or verified) cleanly
+   */
+  protected final boolean reloadNow() {
+    return server.reloadNow();
+  }
+
+  /**
+   * Runs one TLS certificate reload pass synchronously, for the same reason as {@link #reloadNow}.
+   */
+  protected final void reloadTlsNow() {
+    server.reloadTlsNow();
+  }
+
+  /** Runs one outbound CA bundle reload pass synchronously, as {@link #reloadNow} does. */
+  protected final void reloadEgressTrustNow() {
+    server.reloadEgressTrustNow();
+  }
 
   // --- optional apikey security wiring (shared by the admin integration tests) ----------------
 
@@ -219,9 +313,24 @@ abstract class ServerIntegrationTestSupport {
     throw new AssertionError("expected the participant to be called on " + path);
   }
 
-  /** The {@code status} field of a saga REST response body. */
+  /**
+   * The {@code status} field of a saga REST response body.
+   *
+   * <p>Fails with the response when the body is not a snapshot. An error body carries a code and a
+   * message but no {@code status}, so reading one here used to be a bare {@link
+   * NullPointerException} that said nothing about what actually came back, and a caller polling for
+   * a status could not tell a contended read from a saga that never arrived.
+   */
   protected final String status(HttpResponse<String> response) throws IOException {
-    return MAPPER.readTree(response.body()).get("status").asText();
+    JsonNode status = MAPPER.readTree(response.body()).get("status");
+    if (status == null) {
+      throw new IllegalStateException(
+          "expected a saga snapshot, got HTTP "
+              + response.statusCode()
+              + " with body: "
+              + response.body());
+    }
+    return status.asText();
   }
 
   protected final HttpResponse<String> post(String path, String body) throws Exception {
@@ -261,14 +370,23 @@ abstract class ServerIntegrationTestSupport {
 
   /** Polls {@code GET /sagas/{id}} until the saga leaves a non-terminal state, then returns it. */
   protected final String pollUntilTerminal(String sagaId) throws Exception {
+    String lastBody = null;
     for (int i = 0; i < 50; i++) {
-      String status = MAPPER.readTree(get("/sagas/" + sagaId).body()).get("status").asText();
-      if (!status.equals("RUNNING") && !status.equals("COMPENSATING")) {
-        return status;
+      HttpResponse<String> response = get("/sagas/" + sagaId);
+      lastBody = response.body();
+      // A poll can transiently get an error body instead of a snapshot — e.g. a retryable 503
+      // while the asynchronous post-callback drive holds SQLite's single writer. An error body
+      // has no "status" field, so only a 200 is read; anything else means poll again.
+      if (response.statusCode() == 200) {
+        String status = MAPPER.readTree(response.body()).get("status").asText();
+        if (!status.equals("RUNNING") && !status.equals("COMPENSATING")) {
+          return status;
+        }
       }
       Thread.sleep(40);
     }
-    throw new AssertionError("Saga " + sagaId + " did not reach a terminal status in time");
+    throw new AssertionError(
+        "Saga " + sagaId + " did not reach a terminal status in time; last response: " + lastBody);
   }
 
   private HttpResponse<String> send(HttpRequest request) throws Exception {

@@ -7,6 +7,7 @@ import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.rpc.AdminServiceGrpc;
 import com.scalar.db.saga.rpc.SagaServiceGrpc;
+import com.scalar.db.saga.server.SagaWaiterRegistry;
 import com.scalar.db.saga.server.api.CallbackResource;
 import com.scalar.db.saga.server.api.HealthResource;
 import com.scalar.db.saga.server.api.SagaAdminResource;
@@ -16,12 +17,18 @@ import com.scalar.db.saga.server.security.SagaRole;
 import io.grpc.MethodDescriptor;
 import io.javalin.Javalin;
 import io.javalin.router.Endpoint;
+import io.javalin.security.Roles;
 import io.javalin.security.RouteRole;
+import java.io.ByteArrayInputStream;
+import java.io.DataInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.time.Clock;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
@@ -85,6 +92,7 @@ class TransportPolicyParityTest {
           Map.entry("GET /health", SagaOperation.HEALTH),
           Map.entry("HEAD /health", SagaOperation.HEALTH),
           Map.entry("POST /sagas/{id}/steps/{stepName}/complete", SagaOperation.CALLBACK),
+          Map.entry("POST /sagas/{id}/steps/{stepName}/fail", SagaOperation.CALLBACK),
           Map.entry("POST /sagas", SagaOperation.START_SAGA),
           Map.entry("PUT /sagas/{id}", SagaOperation.START_SAGA),
           Map.entry("GET /sagas/{id}", SagaOperation.GET_SAGA),
@@ -156,19 +164,30 @@ class TransportPolicyParityTest {
   @Test
   void restRoutes_allCarryTheExpectedOperation() {
     // Arrange — register the real routes, exactly as SagaServer does
-    Javalin app = Javalin.create();
     DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
-    HealthResource.register(app);
-    SagaResource.register(app, mock(SagaOrchestrator.class), 0L);
-    SagaAdminResource.register(app, orchestrator, 0L);
-    CallbackResource.register(app, orchestrator, "test-secret", 0L, Clock.systemUTC());
+    Javalin app =
+        Javalin.create(
+            cfg -> {
+              HealthResource.register(cfg.routes);
+              SagaResource.register(
+                  cfg.routes,
+                  mock(DefaultSagaOrchestrator.class),
+                  0L,
+                  new java.util.concurrent.CompletableFuture<>(),
+                  new SagaWaiterRegistry());
+              SagaAdminResource.register(cfg.routes, orchestrator, 0L);
+              CallbackResource.register(
+                  cfg.routes, orchestrator, "test-secret", 0L, Clock.systemUTC());
+            });
 
     // Act — enumerate what was actually registered, skipping the before/after handlers
     Map<String, SagaOperation> registered = new HashMap<>();
     Set<String> untagged = new LinkedHashSet<>();
     for (Endpoint endpoint : registeredHttpEndpoints(app)) {
-      String route = endpoint.getMethod() + " " + endpoint.getPath();
-      SagaOperation operation = operationOf(endpoint.getRoles());
+      String route = endpoint.method + " " + endpoint.path;
+      // No roles entry at all reads as untagged, the same as an empty one: both fail closed below.
+      Roles roles = endpoint.metadata(Roles.class);
+      SagaOperation operation = roles == null ? null : operationOf(roles.getRoles());
       if (operation == null) {
         untagged.add(route);
       } else {
@@ -187,19 +206,18 @@ class TransportPolicyParityTest {
 
   /**
    * The app's registered HTTP-verb endpoints, excluding the before/after filter handlers. Reads the
-   * router straight off the config rather than through {@code javalinServlet()}, whose concrete
-   * type depends on which server backs the app.
+   * router straight off the app's state rather than through {@code javalinServlet()}, whose
+   * concrete type depends on which server backs the app.
    */
   private static Iterable<Endpoint> registeredHttpEndpoints(Javalin app) {
     Set<Endpoint> endpoints = new LinkedHashSet<>();
-    app.unsafeConfig()
-        .pvt
+    app.unsafe
         .internalRouter
         .allHttpHandlers()
         .forEach(
             parsed -> {
-              Endpoint endpoint = parsed.getEndpoint();
-              if (endpoint.getMethod().isHttpMethod()) {
+              Endpoint endpoint = parsed.endpoint;
+              if (endpoint.method.isHttpMethod()) {
                 endpoints.add(endpoint);
               }
             });
@@ -213,5 +231,118 @@ class TransportPolicyParityTest {
       }
     }
     return null;
+  }
+
+  /**
+   * No code path in {@link SagaResource} may call a {@link SagaOrchestrator} {@code start}
+   * overload, whether through the interface or through {@link DefaultSagaOrchestrator}, which the
+   * resource is typed against.
+   *
+   * <p>Asserted structurally, by reading the compiled class's constant pool, rather than by driving
+   * the routes: a behavioural check only covers the routes a test happens to exercise, so a newly
+   * added start route would pass it while reintroducing the defect. This is the guard {@code
+   * docs/plans/2026-08-30-001-...-plan.md} asked for and {@code todos/082} recorded as missing.
+   *
+   * <p>Why it matters: the synchronous {@code start} overloads run the entire saga on the calling
+   * thread, which on this layer is a request thread. That was the P1 in {@code todos/076} — ~200
+   * concurrent slow sagas exhausted the Jetty pool. Every REST start must go through {@code
+   * startAsyncReturningSnapshot} with a bound. {@code start} remains correct API for embedded
+   * callers, which is why it still exists and why this guard is scoped to this one class.
+   */
+  @Test
+  void sagaResource_containsNoReferenceToASynchronousStartOverload() throws Exception {
+    // Arrange — the compiled form of the class, including its lambdas (route handlers are compiled
+    // into SagaResource$$Lambda bodies as private synthetic methods of the same class file).
+    byte[] classFile;
+    try (InputStream in =
+        SagaResource.class.getResourceAsStream(SagaResource.class.getSimpleName() + ".class")) {
+      classFile = Objects.requireNonNull(in, "SagaResource.class not found").readAllBytes();
+    }
+
+    // Act — collect every method name this class file references on either orchestrator type. A
+    // call compiles against the static type of its receiver, so scanning only one would miss the
+    // other.
+    Set<String> orchestratorCalls = new LinkedHashSet<>();
+    orchestratorCalls.addAll(referencedMethodsOn(classFile, SagaOrchestrator.class));
+    orchestratorCalls.addAll(referencedMethodsOn(classFile, DefaultSagaOrchestrator.class));
+
+    // Assert — startAsyncReturningSnapshot is expected; start is the regression.
+    assertThat(orchestratorCalls)
+        .as(
+            "SagaResource must not call SagaOrchestrator.start(...) — it runs the saga on the "
+                + "request thread. Use startAsyncReturningSnapshot with a bound (todos/076).")
+        .doesNotContain("start");
+    assertThat(orchestratorCalls)
+        .as("sanity: the scan must actually be seeing the orchestrator calls it inspects")
+        .contains("startAsyncReturningSnapshot");
+  }
+
+  /**
+   * Returns the method names {@code classFile} references on {@code owner}, read from its constant
+   * pool. Lambdas do not hide a call from this: a lambda body compiles to a synthetic method of the
+   * same class, so its calls land in the same constant pool.
+   *
+   * <p>The pool has to be walked in full rather than scanned for a string, because entries are
+   * variable-length and {@code Long}/{@code Double} occupy two slots each — a naive scan
+   * desynchronises. Only {@code Methodref} (10) and {@code InterfaceMethodref} (11) encode a call;
+   * each points at a {@code Class} entry for the owner and a {@code NameAndType} entry for the
+   * method, both of which resolve to {@code Utf8} entries.
+   */
+  private static Set<String> referencedMethodsOn(byte[] classFile, Class<?> owner)
+      throws IOException {
+    Map<Integer, String> utf8 = new HashMap<>();
+    Map<Integer, Integer> classNameIndex = new HashMap<>();
+    Map<Integer, int[]> memberRefs = new HashMap<>(); // -> {classIndex, nameAndTypeIndex}
+    Map<Integer, Integer> nameIndexOfNameAndType = new HashMap<>();
+
+    try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(classFile))) {
+      in.readInt(); // magic
+      in.readUnsignedShort(); // minor
+      in.readUnsignedShort(); // major
+      int count = in.readUnsignedShort();
+      for (int i = 1; i < count; i++) {
+        int tag = in.readUnsignedByte();
+        switch (tag) {
+          case 1 -> utf8.put(i, in.readUTF());
+          case 7, 8, 16, 19, 20 -> {
+            int index = in.readUnsignedShort();
+            if (tag == 7) {
+              classNameIndex.put(i, index);
+            }
+          }
+          case 9, 10, 11, 17, 18 -> {
+            int first = in.readUnsignedShort();
+            int second = in.readUnsignedShort();
+            if (tag == 10 || tag == 11) {
+              memberRefs.put(i, new int[] {first, second});
+            }
+          }
+          case 12 -> {
+            nameIndexOfNameAndType.put(i, in.readUnsignedShort());
+            in.readUnsignedShort(); // descriptor
+          }
+          case 3, 4 -> in.readInt();
+          case 5, 6 -> {
+            in.readLong();
+            i++; // long and double take two constant-pool slots
+          }
+          case 15 -> {
+            in.readUnsignedByte();
+            in.readUnsignedShort();
+          }
+          default -> throw new IOException("unknown constant pool tag " + tag + " at " + i);
+        }
+      }
+    }
+
+    String ownerInternalName = owner.getName().replace('.', '/');
+    Set<String> methods = new LinkedHashSet<>();
+    for (int[] ref : memberRefs.values()) {
+      String refOwner = utf8.get(classNameIndex.get(ref[0]));
+      if (ownerInternalName.equals(refOwner)) {
+        methods.add(utf8.get(nameIndexOfNameAndType.get(ref[1])));
+      }
+    }
+    return methods;
   }
 }

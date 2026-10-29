@@ -1,9 +1,7 @@
 package com.scalar.db.saga.server;
 
 import com.scalar.db.saga.definition.SagaDefinition;
-import com.scalar.db.saga.definition.SagaDefinitionParser;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
-import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.server.api.CallbackResource;
 import com.scalar.db.saga.server.api.ErrorMapper;
 import com.scalar.db.saga.server.api.HealthResource;
@@ -19,30 +17,49 @@ import com.scalar.db.saga.server.grpc.SagaServiceImpl;
 import com.scalar.db.saga.server.security.SagaSecurityHandler;
 import com.scalar.db.saga.server.security.SagaSecurityProvider;
 import com.scalar.db.saga.store.ScalarDbSagaStoreFactory;
+import com.scalar.db.saga.transport.HttpEndpointRegistrar;
+import com.scalar.db.saga.transport.HttpServiceConfig;
 import io.grpc.BindableService;
 import io.grpc.Server;
 import io.grpc.ServerInterceptor;
 import io.grpc.ServerInterceptors;
 import io.grpc.ServerServiceDefinition;
+import io.grpc.TlsServerCredentials;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.protobuf.services.HealthStatusManager;
 import io.javalin.Javalin;
+import io.javalin.router.JavalinDefaultRoutingApi;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
-import java.nio.file.Files;
+import java.net.URI;
+import java.net.http.HttpClient;
 import java.nio.file.Path;
+import java.security.GeneralSecurityException;
 import java.time.Clock;
+import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.stream.Stream;
+import java.util.function.Consumer;
+import javax.net.ssl.KeyManager;
+import javax.net.ssl.SSLContext;
+import org.eclipse.jetty.http.HttpVersion;
+import org.eclipse.jetty.server.HttpConfiguration;
+import org.eclipse.jetty.server.HttpConnectionFactory;
+import org.eclipse.jetty.server.SecureRequestCustomizer;
+import org.eclipse.jetty.server.ServerConnector;
+import org.eclipse.jetty.server.SslConnectionFactory;
 import org.eclipse.jetty.util.BlockingArrayQueue;
+import org.eclipse.jetty.util.ssl.SslContextFactory;
 import org.eclipse.jetty.util.thread.QueuedThreadPool;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -54,10 +71,13 @@ import org.slf4j.bridge.SLF4JBridgeHandler;
  * mode).
  *
  * <p>Construction builds the embedded {@link DefaultSagaOrchestrator} — creating the saga schema if
- * needed — from the configured properties, then loads and registers any declarative saga
- * definitions found at the configured definitions path. {@link #start()} starts background
- * recovery/retention tasks and binds the enabled transports. {@link #close()} stops accepting
- * requests and then drains in-flight sagas via {@link DefaultSagaOrchestrator#close()}.
+ * needed — from the configured properties, then runs one configuration pass that validates and
+ * registers the service files and declarative saga definitions (fatally, preserving fail-fast
+ * boot). {@link #start()} starts background recovery/retention tasks, binds the enabled transports,
+ * and — unless {@code reload.interval_seconds} is {@code 0} — begins re-running that pass
+ * periodically, so service and definition changes apply without a restart. {@link #close()} stops
+ * accepting requests, stops the reload pass, and then drains in-flight sagas via {@link
+ * DefaultSagaOrchestrator#close(long)}.
  *
  * <p>Each transport is independently toggleable ({@link SagaServerConfig#httpEnabled()} / {@link
  * SagaServerConfig#grpcEnabled()}, both on by default); the config layer guarantees at least one is
@@ -72,24 +92,51 @@ import org.slf4j.bridge.SLF4JBridgeHandler;
 public final class SagaServer implements AutoCloseable {
 
   private static final Logger logger = LoggerFactory.getLogger(SagaServer.class);
-  private static final long GRPC_SHUTDOWN_MIN_SECONDS = 30L;
-  private static final long GRPC_SHUTDOWN_SLACK_MILLIS = 5_000L;
+  // The cap on the front phase of shutdown; see frontPhaseMillis.
+  private static final long FRONT_PHASE_MAX_MILLIS = 15_000L;
   private static final long THREAD_POOL_IDLE_TIMEOUT_MILLIS = 60_000L;
   private static final long RATE_LIMIT_WINDOW_MILLIS = 60_000L;
+  // The connect phase of the shared outbound client; the same bound core's HttpEndpoint gives the
+  // client it builds for itself, so a black-holed participant fails as fast either way.
+  private static final Duration EGRESS_CONNECT_TIMEOUT = Duration.ofSeconds(10);
+
+  // The most of the front phase the reload stop may take. It runs before the transports drain, in
+  // the same slice, so without this a pass stuck on a slow store would leave them nothing: Jetty
+  // would skip its graceful phase and gRPC would cancel in-flight calls at once. A pass still
+  // running when it elapses is interrupted, which the manager logs.
+  private static final long RELOAD_STOP_MAX_MILLIS = 5_000L;
 
   private final SagaServerConfig config;
   private final DefaultSagaOrchestrator orchestrator;
+  // Shared by the engine, which notifies it, and both transports, whose waiters register on it.
+  private final SagaWaiterRegistry waiterRegistry;
   private final SagaSecurityProvider securityProvider;
   // The shared per-principal saga-start limiter, or null when rate limiting is disabled. Shared by
   // both transports (REST before-handler and gRPC interceptor) so a caller's budget spans both.
   private final @Nullable RateLimiter rateLimiter;
+  // The key manager both transports serve TLS from, and the pass that rotates it; null when TLS is
+  // disabled. Built before anything else is wired, so a bad certificate or key fails construction,
+  // long before either port could bind.
+  private final @Nullable TlsReloader tlsReloader;
+  private final @Nullable EgressTrust egressTrust;
+  // The client every participant endpoint shares when an egress CA bundle is configured. The
+  // endpoints treat a supplied client as the caller's, so this server shuts it down at close.
+  private final @Nullable HttpClient egressClient;
   // Each transport is null when disabled; SagaServerConfig guarantees at least one is enabled.
   private final @Nullable Javalin httpServer;
+  private final @Nullable ExecutorService httpVirtualThreads;
   private final @Nullable ExecutorService grpcExecutor;
   private final @Nullable Server grpcServer;
   private final @Nullable HealthStatusManager grpcHealth;
   private final AtomicBoolean closed = new AtomicBoolean();
+  // Completed at the top of close(), so a bounded synchronous start stops waiting the moment
+  // shutdown begins instead of holding its request until the wait bound elapses.
+  private final CompletableFuture<Void> shutdownSignal = new CompletableFuture<>();
   private volatile boolean grpcStarted;
+  // The reload pipeline: the reconciler is also the boot loader; the manager is null when
+  // reload.interval_seconds is 0 (startup-only loading).
+  private final ConfigReconciler reconciler;
+  private final @Nullable SagaConfigReloadManager reloadManager;
 
   /**
    * Builds the server, its underlying saga engine (connecting to ScalarDB), and registers
@@ -98,21 +145,62 @@ public final class SagaServer implements AutoCloseable {
    * @param config the server configuration
    */
   public SagaServer(SagaServerConfig config) {
-    this(config, buildDefaultSagaOrchestrator(config));
+    // The registry is created here rather than inside the orchestrator build so that one instance
+    // reaches both the engine (as a settlement listener) and the two transports (as the place their
+    // waiters register). Naming it takes a statement ahead of this(...), which JEP 513 allows.
+    SagaWaiterRegistry waiterRegistry = new SagaWaiterRegistry();
+    this(config, buildDefaultSagaOrchestrator(config, waiterRegistry), waiterRegistry);
   }
 
   /**
    * Visible for testing: builds the server around an already-constructed {@link
    * DefaultSagaOrchestrator}, so a test can inject a mock to exercise definition loading and route
-   * wiring without a database.
+   * wiring without a database. The orchestrator supplied here is not wired to the registry, so a
+   * saga settling on it notifies no waiter — which is what a mock orchestrator does anyway.
    */
   SagaServer(SagaServerConfig config, DefaultSagaOrchestrator orchestrator) {
+    this(config, orchestrator, new SagaWaiterRegistry());
+  }
+
+  private SagaServer(
+      SagaServerConfig config,
+      DefaultSagaOrchestrator orchestrator,
+      SagaWaiterRegistry waiterRegistry) {
     this.config = Objects.requireNonNull(config, "config must not be null");
     this.orchestrator = Objects.requireNonNull(orchestrator, "orchestrator must not be null");
-    Javalin httpServer = config.httpEnabled() ? createHttpServer(config) : null;
+    // No null check: unlike the two above, this argument reaches no caller outside this class.
+    this.waiterRegistry = waiterRegistry;
+    // TLS material is validated first, in its own guarded step: the orchestrator is the only
+    // resource alive yet, and both transports and every outbound client below consume the result.
+    TlsReloader tlsReloader = null;
+    EgressTrust egressTrust = null;
+    try {
+      if (config.tlsEnabled()) {
+        Path certChainPath = config.tlsCertChainPath().orElseThrow();
+        Path privateKeyPath = config.tlsPrivateKeyPath().orElseThrow();
+        tlsReloader =
+            new TlsReloader(
+                certChainPath,
+                privateKeyPath,
+                config.reloadConfig().clock(),
+                TlsMaterial.load(certChainPath, privateKeyPath));
+      }
+      egressTrust = config.egressCaCertPath().map(EgressTrust::new).orElse(null);
+    } catch (RuntimeException e) {
+      orchestrator.close();
+      throw e;
+    }
+    this.tlsReloader = tlsReloader;
+    this.egressTrust = egressTrust;
+    HttpClient egressClient = egressTrust == null ? null : buildEgressClient(egressTrust);
+    this.egressClient = egressClient;
+    // Created here rather than inside createHttpServer so the server owns it: Jetty never stops
+    // an executor it was handed, and close() must be able to wait for handler bodies.
+    ExecutorService httpVirtualThreads =
+        config.httpEnabled() ? Executors.newVirtualThreadPerTaskExecutor() : null;
     ExecutorService grpcExecutor =
         config.grpcEnabled() ? Executors.newVirtualThreadPerTaskExecutor() : null;
-    this.httpServer = httpServer;
+    this.httpVirtualThreads = httpVirtualThreads;
     this.grpcExecutor = grpcExecutor;
     this.rateLimiter =
         config.maxStartRequestsPerMinute() > 0
@@ -121,13 +209,75 @@ public final class SagaServer implements AutoCloseable {
     // Built before wiring the transports so both can share one provider (the gRPC interceptor uses
     // it too). A null placeholder lets the catch below close it only if it was built.
     @Nullable SagaSecurityProvider provider = null;
+    // Same placeholder idiom: the catch below stops the manager only if it was built, and cannot
+    // read the final field to find out.
+    @Nullable SagaConfigReloadManager manager = null;
     try {
-      provider = SecurityProviderFactory.create(config);
+      provider =
+          SecurityProviderFactory.create(
+              config, egressTrust == null ? null : egressTrust.sslContext().getSocketFactory());
       this.securityProvider = provider;
-      loadDefinitions();
-      if (httpServer != null) {
-        registerRoutes(httpServer);
+      // Boot goes through the same pass reload uses: snapshot, validate (aggregated), apply. It is
+      // the only thing that installs endpoints, so "any set a reload accepted also cold-boots a
+      // fresh replica" holds by construction rather than by two paths agreeing.
+      ConfigReconciler configReconciler =
+          new ConfigReconciler(
+              config.reloadConfig(),
+              config.definitionsPath().orElse(null),
+              config.callbackBaseUrl().isPresent() && config.callbackSecret().isPresent(),
+              new ServiceSecretResolver(config.reloadConfig().secretsRoot()),
+              egressClient == null
+                  ? orchestrator.httpEndpointRegistrar()
+                  : withEgressClient(orchestrator.httpEndpointRegistrar(), egressClient),
+              new DefinitionStore() {
+                @Override
+                public void register(SagaDefinition definition) {
+                  orchestrator.register(definition);
+                }
+
+                @Override
+                public @Nullable SagaDefinition latest(String sagaName) {
+                  return orchestrator.latestDefinition(sagaName);
+                }
+
+                @Override
+                public boolean isRegistered(String sagaName, String version) {
+                  return orchestrator.isDefinitionRegistered(sagaName, version);
+                }
+              },
+              // What this replica's files describe is what it serves. The store keeps every
+              // definition ever registered, so without this a saga could never be taken out of
+              // service: removing its file would leave it startable here forever.
+              orchestrator::serve);
+      this.reconciler = configReconciler;
+      configReconciler.runOrThrow();
+      // A daemon with no registered definitions cannot run any saga — fail fast rather than serve
+      // a healthy but useless process. Reload cannot lift this later: the empty-transition guard
+      // rejects a wind-down to zero, so a useful daemon always starts with at least one.
+      if (configReconciler.appliedDefinitionCount() == 0) {
+        throw new IllegalStateException(noDefinitionsMessage(config));
       }
+      logger.info("Registered {} saga definition(s)", configReconciler.appliedDefinitionCount());
+      // The certificate passes ride the same schedule: they need no interval of their own, and one
+      // thread serializes them with the configuration pass.
+      manager =
+          config.reloadConfig().intervalSeconds() > 0
+              ? new SagaConfigReloadManager(
+                  configReconciler,
+                  config.reloadConfig(),
+                  certificatePasses(tlsReloader, egressTrust))
+              : null;
+      this.reloadManager = manager;
+      // Built here rather than with the executors above: Javalin takes its routes at creation, and
+      // the routes need the security provider, the limiter and the orchestrator wired first.
+      this.httpServer =
+          httpVirtualThreads == null
+              ? null
+              : createHttpServer(
+                  config,
+                  tlsReloader == null ? null : tlsReloader.keyManager(),
+                  httpVirtualThreads,
+                  this::registerRoutes);
       if (grpcExecutor != null) {
         HealthStatusManager health = new HealthStatusManager();
         this.grpcHealth = health;
@@ -137,13 +287,22 @@ public final class SagaServer implements AutoCloseable {
         this.grpcServer = null;
       }
     } catch (RuntimeException e) {
-      // Release the executor, the security provider, and the store/DB connections held by the
-      // orchestrator if startup wiring fails.
+      // Release the executors, the security provider, and the store/DB connections held by the
+      // orchestrator if startup wiring fails. The reload manager may already exist — it is built
+      // before the routes are wired, and wiring them can throw — and close() is not reached on
+      // this path, so it is stopped here rather than left behind.
+      if (manager != null) {
+        manager.stop(System.nanoTime());
+      }
+      if (httpVirtualThreads != null) {
+        httpVirtualThreads.shutdown();
+      }
       if (grpcExecutor != null) {
         grpcExecutor.shutdown();
       }
       closeSecurityProvider(provider);
       orchestrator.close();
+      shutdownEgressClient(egressClient);
       throw e;
     }
   }
@@ -163,11 +322,22 @@ public final class SagaServer implements AutoCloseable {
    */
   private Server buildGrpcServer(ExecutorService executor, HealthStatusManager health) {
     SagaServiceImpl service =
-        new SagaServiceImpl(orchestrator, config.syncTimeoutMillis(), config.syncMaxWaitMillis());
+        new SagaServiceImpl(
+            orchestrator, config::syncWaitBoundMillis, shutdownSignal, waiterRegistry);
     AdminServiceImpl adminService = new AdminServiceImpl(orchestrator, adminDriveDeadlineMillis());
     SagaSecurityInterceptor security = new SagaSecurityInterceptor(securityProvider);
+    InetSocketAddress address = new InetSocketAddress(config.host(), config.grpcPort());
+    // TLS goes through the stable credentials API around the shared key manager rather than
+    // useTransportSecurity, which pins one certificate at build time. grpc-netty gives a custom
+    // key manager the same ALPN h2, HTTP/2 cipher and JDK-provider policy it gives PEM input, and
+    // JSSE consults the manager on every handshake, so material published later reaches new
+    // connections with no rebuild.
     NettyServerBuilder builder =
-        NettyServerBuilder.forAddress(new InetSocketAddress(config.host(), config.grpcPort()))
+        (tlsReloader == null
+                ? NettyServerBuilder.forAddress(address)
+                : NettyServerBuilder.forAddress(
+                    address,
+                    TlsServerCredentials.newBuilder().keyManager(tlsReloader.keyManager()).build()))
             .addService(intercepted(service, security))
             .addService(intercepted(adminService, security))
             .addService(health.getHealthService())
@@ -178,10 +348,17 @@ public final class SagaServer implements AutoCloseable {
   }
 
   /**
-   * Applies the two inbound caps to the gRPC transport. The message cap is the load-bearing one: it
-   * is derived from the store's payload cap, so dropping it would leave gRPC on its own 4 MiB
+   * Applies the transport settings: the two inbound caps. The message cap is the load-bearing one:
+   * it is derived from the store's payload cap, so dropping it would leave gRPC on its own 4 MiB
    * default and the daemon would accept a message the store then refuses to persist, surfacing as a
    * write error that names the store rather than the transport that let it in.
+   *
+   * <p>These caps also anchor a client-side classification: the SDK maps a bare {@code
+   * RESOURCE_EXHAUSTED} carrying no error body to the non-retryable {@code UNMAPPED_SERVER_STATUS}
+   * on the premise that every transport-level source of that status (the two caps here, plus the
+   * keepalive enforcement in {@link #buildGrpcServer}) can never succeed on retry. Adding a
+   * transport limit that refuses work a retry could outlast means revisiting {@code
+   * GrpcClientSupport.unresolvedOrBare} first.
    *
    * <p>Visible for testing, for the same reason as {@link #applyEngineSettings}: a builder does not
    * read its settings back, so the only way to observe the forwarding is to watch it receive them.
@@ -212,11 +389,88 @@ public final class SagaServer implements AutoCloseable {
     return ServerInterceptors.interceptForward(service, interceptors);
   }
 
-  private static DefaultSagaOrchestrator buildDefaultSagaOrchestrator(SagaServerConfig config) {
+  /**
+   * The one outbound client every participant endpoint shares when an egress CA bundle is
+   * configured, built as {@code HttpEndpoint} builds its own: no redirects, which keeps a service's
+   * {@code allowed_hosts} from being bypassed by a 3xx, and a bounded connect phase.
+   */
+  private static HttpClient buildEgressClient(EgressTrust egressTrust) {
+    return HttpClient.newBuilder()
+        .connectTimeout(EGRESS_CONNECT_TIMEOUT)
+        .followRedirects(HttpClient.Redirect.NEVER)
+        .sslContext(egressTrust.sslContext())
+        .build();
+  }
+
+  /**
+   * Releases the shared outbound client's selector thread and pooled connections. {@code
+   * shutdown()}, never {@code close()}, for the reason {@code HttpEndpointManager} gives: close may
+   * block indefinitely on an abandoned streaming body.
+   */
+  private static void shutdownEgressClient(@Nullable HttpClient egressClient) {
+    if (egressClient != null) {
+      egressClient.shutdown();
+    }
+  }
+
+  /**
+   * Wraps {@code registrar} so every service it installs connects through {@code client}. The
+   * reconciler describes services without a client, and the same client instance on every pass
+   * keeps an unchanged service's config equal, so the registrar still reuses its endpoint.
+   *
+   * <p>Visible for testing.
+   */
+  static HttpEndpointRegistrar withEgressClient(
+      HttpEndpointRegistrar registrar, HttpClient client) {
+    return services -> {
+      Map<String, HttpServiceConfig> withClient = new LinkedHashMap<>();
+      services.forEach(
+          (name, service) ->
+              withClient.put(
+                  name,
+                  new HttpServiceConfig(
+                      service.baseUrl(),
+                      service.allowedHosts(),
+                      service.maxBodyBytes(),
+                      client,
+                      service.defaultHeaders())));
+      registrar.swapHttpEndpoints(withClient);
+    };
+  }
+
+  /**
+   * The reload manager's certificate hook: the server's own TLS pass and the outbound trust pass,
+   * or {@code null} when there is neither. Each pass logs its own rejections; the {@code finally}
+   * keeps an unexpected failure in the first from costing the second its turn, as the manager does
+   * for its passes.
+   *
+   * <p>Visible for testing.
+   */
+  static @Nullable Runnable certificatePasses(
+      @Nullable TlsReloader tlsReloader, @Nullable EgressTrust egressTrust) {
+    if (tlsReloader == null && egressTrust == null) {
+      return null;
+    }
+    return () -> {
+      try {
+        if (tlsReloader != null) {
+          tlsReloader.run();
+        }
+      } finally {
+        if (egressTrust != null) {
+          egressTrust.run();
+        }
+      }
+    };
+  }
+
+  private static DefaultSagaOrchestrator buildDefaultSagaOrchestrator(
+      SagaServerConfig config, SagaWaiterRegistry waiterRegistry) {
     Objects.requireNonNull(config, "config must not be null");
     DefaultSagaOrchestrator.Builder builder =
         DefaultSagaOrchestrator.newBuilder()
-            .storeFactory(ScalarDbSagaStoreFactory.create(config.properties()));
+            .storeFactory(ScalarDbSagaStoreFactory.create(config.properties()))
+            .settlementListener(waiterRegistry);
     applyEngineSettings(builder, config);
     return builder.build();
   }
@@ -237,9 +491,14 @@ public final class SagaServer implements AutoCloseable {
         .ownerId(config.ownerId())
         .shutdownMode(config.shutdownMode())
         .shutdownTimeoutMillis(config.shutdownTimeoutMillis())
+        .defaultSagaTimeoutMillis(config.defaultSagaTimeoutMillis())
+        .maxTimelineEvents(config.detailMaxTimelineEvents())
+        .maxConcurrentSagaStarts(config.maxConcurrentSagaStarts())
         .recoveryConfig(config.recoveryConfig())
         .retentionConfig(config.retentionConfig());
-    config.services().forEach((name, service) -> addHttpEndpoint(builder, name, service));
+    // No endpoints here: the orchestrator is built with none, and the boot configuration pass
+    // installs them through the same swap a reload uses. One conversion from service file to live
+    // endpoint means a set that boots and a set that reloads cannot drift apart.
     // Enable async-callback provisioning only when both the callback base URL and secret are set;
     // otherwise no provider is wired and registering an async definition fails fast (in the
     // engine).
@@ -251,132 +510,128 @@ public final class SagaServer implements AutoCloseable {
   }
 
   /**
-   * Registers one configured service as an HTTP endpoint, applying the optional outbound policy.
-   * {@code allowedHosts} and {@code maxBodyBytes} are applied only when configured, so an unset key
-   * leaves the engine's own default in place rather than overwriting it with a sentinel. Visible
-   * for testing, like {@link #applyEngineSettings}.
+   * Builds the Javalin app with a bounded Jetty thread pool and a bounded job queue, so the
+   * dispatch backlog cannot grow without limit. The idle timeout lets the pool shrink back toward
+   * {@code minThreads} when quiet, and the queue's fixed capacity makes the pool reject rather than
+   * grow once both are full. It does <b>not</b> shed a burst of slow requests — see below. When TLS
+   * is enabled, the listener is the HTTPS connector built by {@link #tlsConnector}, which displaces
+   * Javalin's default plaintext one.
+   *
+   * <p><b>Handlers run on virtual threads.</b> The pool is given a virtual-thread executor, so
+   * Jetty dispatches each blocking handler invocation onto a virtual thread and the platform thread
+   * returns to the pool immediately. A request waiting on its saga therefore costs a parked virtual
+   * thread rather than one of {@code maxThreads} OS threads, which is what lets a synchronous start
+   * wait without the request pool being the limit. gRPC has always worked this way (its handler
+   * executor is virtual); this brings HTTP into line.
+   *
+   * <p>Two consequences worth naming. First, {@code maxThreads} no longer caps how many requests
+   * are in flight — it caps how many can be <em>dispatched</em> at once. Jetty's execution strategy
+   * routes a blocking handler invocation to the virtual-thread executor, so it never enters the job
+   * queue below; measured on a 4-thread pool, 300 concurrent slow requests all ran, where before
+   * the change 2 ran and the rest were shed. So the pool and its queue no longer shed saga-induced
+   * load at the front door, and <b>nothing currently bounds concurrent saga execution</b> — the
+   * engine's executors are unbounded and the rate limiter is off by default. Bounding it is
+   * admission control's job and admission control does not exist yet; until it does, overload
+   * degrades into store-connection contention and latency rather than failing fast. The queue is
+   * still kept: it bounds the dispatch backlog, which is memory, and it is what makes the pool
+   * reject rather than grow when the producer side saturates.
+   *
+   * <p>Second, because handlers now block on virtual threads, store I/O on the request path can pin
+   * a carrier with a natively-blocking driver; see {@code todos/070} (Java 25) and {@code
+   * todos/071} (the store bulkhead).
+   *
+   * <p>{@code routes} registers the routes and handlers. Javalin takes them while the server is
+   * created rather than on the built server, so the caller has to have everything the routes depend
+   * on in hand before calling this.
    */
-  static void addHttpEndpoint(
-      DefaultSagaOrchestrator.Builder builder,
-      String name,
-      SagaServerConfig.ServiceConfig service) {
-    DefaultSagaOrchestrator.Builder.HttpEndpointBuilder endpoint =
-        builder.httpEndpoint(name, service.baseUrl());
-    if (!service.allowedHosts().isEmpty()) {
-      endpoint.allowedHosts(service.allowedHosts().toArray(new String[0]));
-    }
-    if (service.maxBodyBytes() > 0) {
-      endpoint.maxBodyBytes(service.maxBodyBytes());
-    }
-    endpoint.defaultHeaders(service.headers()).add();
-  }
-
-  private void loadDefinitions() {
-    int count = config.definitionsPath().map(this::registerDefinitions).orElse(0);
-    // A daemon with no registered definitions cannot run any saga, and definitions are currently
-    // loaded only here at startup — so fail fast rather than serve a healthy but useless process.
-    // If dynamic definition registration (e.g. an admin endpoint) is added later, relax this to
-    // allow an empty startup when that mechanism is enabled.
-    if (count == 0) {
-      throw new IllegalStateException(
-          "No saga definitions registered. Set '"
-              + SagaServerConfig.DEFINITIONS_PATH_KEY
-              + "' to a file or directory containing at least one saga definition.");
-    }
-    logger.info("Registered {} saga definition(s)", count);
-  }
-
-  private int registerDefinitions(Path path) {
-    try {
-      if (Files.isDirectory(path)) {
-        try (Stream<Path> files = Files.list(path)) {
-          List<Path> definitions =
-              files
-                  .filter(Files::isRegularFile)
-                  .filter(SagaServer::isDefinitionFile)
-                  .sorted()
-                  .toList();
-          definitions.forEach(this::registerDefinition);
-          return definitions.size();
-        }
-      }
-      registerDefinition(path);
-      return 1;
-    } catch (IOException e) {
-      throw new UncheckedIOException("Failed to load saga definitions from " + path, e);
-    }
-  }
-
-  /**
-   * Parses one definition file and registers it, rejecting code steps — daemon mode is
-   * declarative-only (see the class comment).
-   */
-  private void registerDefinition(Path path) {
-    SagaDefinition definition = SagaDefinitionParser.parseFile(path);
-    for (SagaDefinition.StepDefinition step : definition.getSteps()) {
-      if (step instanceof SagaDefinition.ClassStep) {
-        throw new SagaDefinitionException(
-            "Saga '"
-                + definition.getName()
-                + "' step '"
-                + step.getName()
-                + "' is a code step (stepClass), which daemon mode does not support. Use a"
-                + " declarative service step, or run the engine in embedded mode for code steps.");
-      }
-    }
-    orchestrator.register(applyDefaultTimeout(definition));
-  }
-
-  /**
-   * Applies the server-wide default saga timeout to a definition that specified none ({@code
-   * timeoutMillis == 0}), so a daemon-hosted saga cannot run without a deadline. A definition's own
-   * timeout is left untouched, and when no default is configured this is a no-op.
-   */
-  private SagaDefinition applyDefaultTimeout(SagaDefinition definition) {
-    long defaultTimeout = config.defaultSagaTimeoutMillis();
-    if (defaultTimeout > 0 && definition.getTimeoutMillis() == 0) {
-      logger.info(
-          "Applying default timeout of {} ms to saga '{}' (no timeout set)",
-          defaultTimeout,
-          definition.getName());
-      return definition.withTimeoutMillis(defaultTimeout);
-    }
-    return definition;
-  }
-
-  private static boolean isDefinitionFile(Path path) {
-    String name = path.getFileName().toString().toLowerCase(Locale.ROOT);
-    return name.endsWith(".json") || name.endsWith(".yaml") || name.endsWith(".yml");
-  }
-
-  /**
-   * Builds the Javalin app with a bounded Jetty thread pool <b>and</b> a bounded job queue, so a
-   * burst of slow requests can exhaust neither request-handling threads nor memory. {@code
-   * maxThreads} caps concurrency; the idle timeout lets the pool shrink back toward {@code
-   * minThreads} when quiet; and once all threads are busy, at most {@code maxQueuedRequests} more
-   * requests wait before the server sheds load (fast failure) rather than queueing unboundedly.
-   */
-  private static Javalin createHttpServer(SagaServerConfig config) {
+  // Package-private for testing that handlers really land on virtual threads, without booting a
+  // server; the same reason frontPhaseMillis() is. A silent revert to platform threads would leave
+  // the daemon healthy and this fix inert, so it is worth a direct assertion.
+  static Javalin createHttpServer(
+      SagaServerConfig config,
+      @Nullable KeyManager keyManager,
+      ExecutorService virtualThreads,
+      Consumer<JavalinDefaultRoutingApi> routes) {
     int queueCap = config.httpMaxQueuedRequests();
-    // A fixed-capacity queue (initial == growBy == max == cap): it never grows past the cap, so the
-    // backlog is memory-bounded and the pool rejects further work once threads and queue are full.
-    BlockingArrayQueue<Runnable> jobQueue = new BlockingArrayQueue<>(queueCap, queueCap, queueCap);
+    // A fixed-capacity queue: it never grows past the cap, so the backlog is memory-bounded and
+    // the pool rejects further work once threads and queue are full.
+    BlockingArrayQueue<Runnable> jobQueue = new BlockingArrayQueue<>(queueCap);
     return Javalin.create(
-        cfg ->
-            cfg.jetty.threadPool =
-                new QueuedThreadPool(
-                    config.httpMaxThreads(),
-                    config.httpMinThreads(),
-                    (int) THREAD_POOL_IDLE_TIMEOUT_MILLIS,
-                    jobQueue));
+        cfg -> {
+          QueuedThreadPool threadPool =
+              new QueuedThreadPool(
+                  config.httpMaxThreads(),
+                  config.httpMinThreads(),
+                  (int) THREAD_POOL_IDLE_TIMEOUT_MILLIS,
+                  jobQueue);
+          // Jetty's AdaptiveExecutionStrategy routes BLOCKING invocations here, which is how the
+          // handler body ends up on a virtual thread while the pool keeps its bounded queue.
+          threadPool.setVirtualThreadsExecutor(virtualThreads);
+          cfg.jetty.threadPool = threadPool;
+          if (keyManager != null) {
+            // Registering any connector suppresses Javalin's default plaintext one (it is created
+            // only when the connector list is empty), so TLS-on cannot leak a plaintext listener.
+            cfg.jetty.addConnector(
+                (server, httpConfig) -> tlsConnector(server, httpConfig, config, keyManager));
+          }
+          routes.accept(cfg.routes);
+        });
   }
 
-  private void registerRoutes(Javalin httpServer) {
+  /**
+   * Builds the HTTPS connector: Jetty's {@code SslContextFactory} handed a ready-made {@code
+   * SSLContext} over the shared key manager, chained {@code SslConnectionFactory ->
+   * HttpConnectionFactory}. The factory gets the context rather than a keystore so that JSSE
+   * consults the key manager on every handshake: material published to it later reaches new
+   * connections with no factory reload, and the context, hence its session cache, is never rebuilt,
+   * so a client resuming a session across a rotation is not refused. Without a keystore the factory
+   * installs no SNI matcher, so clients are served whatever name they dial by. Host and port live
+   * on the connector because Javalin ignores {@code start(host, port)} arguments once a custom
+   * connector exists — see the TLS branch in {@link #start()}.
+   */
+  private static ServerConnector tlsConnector(
+      org.eclipse.jetty.server.Server server,
+      HttpConfiguration baseConfig,
+      SagaServerConfig config,
+      KeyManager keyManager) {
+    SslContextFactory.Server sslContextFactory = new SslContextFactory.Server();
+    sslContextFactory.setSslContext(sslContextOver(keyManager));
+    // Copy before mutating: Javalin hands the same HttpConfiguration instance to every connector
+    // callback and would back a default connector with it too.
+    HttpConfiguration httpsConfig = new HttpConfiguration(baseConfig);
+    // Populates isSecure() and the https scheme. sniHostCheck stays off: with it on, Jetty answers
+    // clients that dial by IP — Kubernetes probes, the smoke test, port-forwards — with a 400
+    // "Invalid SNI" instead of serving them.
+    httpsConfig.addCustomizer(new SecureRequestCustomizer(false));
+    ServerConnector connector =
+        new ServerConnector(
+            server,
+            new SslConnectionFactory(sslContextFactory, HttpVersion.HTTP_1_1.asString()),
+            new HttpConnectionFactory(httpsConfig));
+    connector.setHost(config.host());
+    connector.setPort(config.httpPort());
+    return connector;
+  }
+
+  /** The HTTPS context over the shared key manager: default trust, default randomness. */
+  private static SSLContext sslContextOver(KeyManager keyManager) {
+    try {
+      SSLContext sslContext = SSLContext.getInstance("TLS");
+      sslContext.init(new KeyManager[] {keyManager}, null, null);
+      return sslContext;
+    } catch (GeneralSecurityException e) {
+      // A JVM with no TLS context, or one refusing an already-validated key manager, is a runtime
+      // fault rather than a configuration one.
+      throw new IllegalStateException("Failed to build the HTTPS SSLContext", e);
+    }
+  }
+
+  private void registerRoutes(JavalinDefaultRoutingApi routes) {
     // The RBAC handler authenticates every matched route according to the SagaOperation the route
     // declares; the two routes that carry no caller credential (the liveness probe, and the
     // async-callback route with its own per-step HMAC) are tagged with an auth-exempt operation
     // rather than listed here, so a route's policy travels with its registration.
-    SagaSecurityHandler.register(httpServer, securityProvider);
+    SagaSecurityHandler.register(routes, securityProvider);
     // Rate limiting runs after auth (it keys off the resolved principal) and only when enabled.
     // Both
     // are beforeMatched handlers, and this registration order is what puts the limiter after the
@@ -385,12 +640,17 @@ public final class SagaServer implements AutoCloseable {
     // is
     // per caller, not per port.
     if (rateLimiter != null) {
-      RateLimitHandler.register(httpServer, rateLimiter);
+      RateLimitHandler.register(routes, rateLimiter);
     }
-    HealthResource.register(httpServer);
-    ErrorMapper.register(httpServer);
-    SagaResource.register(httpServer, orchestrator, config.syncTimeoutMillis());
-    SagaAdminResource.register(httpServer, orchestrator, adminDriveDeadlineMillis());
+    HealthResource.register(routes);
+    ErrorMapper.register(routes);
+    SagaResource.register(
+        routes,
+        orchestrator,
+        config.syncWaitBoundMillis(Long.MAX_VALUE),
+        shutdownSignal,
+        waiterRegistry);
+    SagaAdminResource.register(routes, orchestrator, adminDriveDeadlineMillis());
     // The async-callback route exists only when a callback secret is configured; without it there
     // is nothing to authenticate callbacks against, so async completion is not enabled.
     config
@@ -398,7 +658,7 @@ public final class SagaServer implements AutoCloseable {
         .ifPresent(
             secret ->
                 CallbackResource.register(
-                    httpServer,
+                    routes,
                     orchestrator,
                     secret,
                     config.callbackMaxAgeSeconds(),
@@ -406,21 +666,15 @@ public final class SagaServer implements AutoCloseable {
   }
 
   /**
-   * The bound on a single-saga admin inline drive: {@code sync.max_wait_millis} — the daemon's
-   * standing ceiling on how long any request may hold a thread — tightened by {@code
-   * sync.timeout_millis} when that is set. This mirrors the terms {@code
-   * SagaServiceImpl.computeBoundMillis} applies on the request-thread paths, minus the per-call
-   * gRPC client deadline, which has no REST analogue. Past the bound the durable transition is
-   * already recorded and the response carries the saga's current state, so the bound only caps how
-   * long the request waits, never correctness. Reusing {@code sync.max_wait_millis} keeps the drive
-   * inside the shutdown drain window {@link #grpcDrainMillis()} derives from the same value.
+   * The bound on a single-saga admin inline drive: the shared synchronous-wait bound, with no
+   * caller-supplied cap. Past the bound the durable transition is already recorded and the response
+   * carries the saga's current state, so the bound only caps how long the request waits, never
+   * correctness. Deriving it from {@code sync.max_wait_millis} keeps it on the one wait bound every
+   * transport shares. Unlike a synchronous start, shutdown does not wake it: a drive in flight at
+   * shutdown holds its request until the front slice ends, and the engine's drain then settles it.
    */
   private long adminDriveDeadlineMillis() {
-    long bound = config.syncMaxWaitMillis();
-    if (config.syncTimeoutMillis() > 0L) {
-      bound = Math.min(bound, config.syncTimeoutMillis());
-    }
-    return bound;
+    return config.syncWaitBoundMillis(Long.MAX_VALUE);
   }
 
   /**
@@ -431,25 +685,56 @@ public final class SagaServer implements AutoCloseable {
    * unconfigured daemon would serve full-access requests to anyone on the network.
    */
   private void ensureSecureBindingOrAcknowledged() {
+    String refusal = insecureBindingRefusal(config);
+    if (refusal != null) {
+      throw new IllegalArgumentException(refusal);
+    }
+  }
+
+  /**
+   * The settings {@link #insecureBindingRefusal} reads, so an offline check can tell whether its
+   * verdict would rest on a value that machine could not read. Stated beside the rule rather than
+   * at the call site: a rule that comes to read another setting has to name it here too, and both
+   * are in view at once.
+   */
+  static Set<String> insecureBindingKeys() {
+    return Set.of(
+        SagaServerConfig.SECURITY_PROVIDER_KEY,
+        SagaServerConfig.HOST_KEY,
+        SagaServerConfig.INSECURE_MODE_ENABLED_KEY);
+  }
+
+  /**
+   * The refusal message for starting unauthenticated on a network-reachable interface, or {@code
+   * null} when the binding is acceptable.
+   *
+   * <p>Shared with {@code --validate-config}, like {@link #noDefinitionsMessage(SagaServerConfig)}:
+   * the rule reads three configuration values and nothing else, so an offline check can reach the
+   * same verdict, and a configuration this refuses must not be one the validator calls acceptable.
+   * Stated once so the two cannot come to disagree. The settings it reads are named by {@link
+   * #insecureBindingKeys()}, so a caller holding values it could not resolve can tell whether this
+   * verdict would rest on one.
+   */
+  static @Nullable String insecureBindingRefusal(SagaServerConfig config) {
     if (config.securityProvider().equals("noop")
         && !LoopbackHost.isLoopback(config.host())
         && !config.insecureModeEnabled()) {
-      throw new IllegalArgumentException(
-          "Refusing to start unauthenticated on a network-reachable interface: '"
-              + SagaServerConfig.SECURITY_PROVIDER_KEY
-              + "="
-              + config.securityProvider()
-              + "' disables authentication, but '"
-              + SagaServerConfig.HOST_KEY
-              + "="
-              + config.host()
-              + "' is not a loopback address. Configure a real security provider (jwt or apikey),"
-              + " bind '"
-              + SagaServerConfig.HOST_KEY
-              + "' to a loopback address, or set '"
-              + SagaServerConfig.INSECURE_MODE_ENABLED_KEY
-              + "=true' to acknowledge running without authentication on an exposed interface.");
+      return "Refusing to start unauthenticated on a network-reachable interface: '"
+          + SagaServerConfig.SECURITY_PROVIDER_KEY
+          + "="
+          + config.securityProvider()
+          + "' disables authentication, but '"
+          + SagaServerConfig.HOST_KEY
+          + "="
+          + config.host()
+          + "' is not a loopback address. Configure a real security provider (jwt or apikey),"
+          + " bind '"
+          + SagaServerConfig.HOST_KEY
+          + "' to a loopback address, or set '"
+          + SagaServerConfig.INSECURE_MODE_ENABLED_KEY
+          + "=true' to acknowledge running without authentication on an exposed interface.";
     }
+    return null;
   }
 
   /**
@@ -475,6 +760,48 @@ public final class SagaServer implements AutoCloseable {
   }
 
   /**
+   * Warns when TLS is on but the async-callback base URL is plain {@code http} on a non-loopback
+   * host: participants would dial the daemon's TLS port over plaintext and die at handshake — at
+   * the first async step in production, not at startup. A warning rather than an error because the
+   * callback URL may legitimately point at separate plaintext infrastructure (an internal ingress
+   * that terminates TLS elsewhere); loopback stays quiet for the same local-dev reason as the other
+   * guards. A base URL that does not parse as a URI draws a warning too: nothing downstream ever
+   * parses the value (the callback provider builds URLs by plain concatenation), so silence here
+   * would be silence everywhere.
+   */
+  private void warnIfCallbackBaseUrlIsPlaintextUnderTls() {
+    if (!config.tlsEnabled() || config.callbackBaseUrl().isEmpty()) {
+      return;
+    }
+    URI baseUrl;
+    try {
+      baseUrl = URI.create(config.callbackBaseUrl().get());
+    } catch (IllegalArgumentException e) {
+      // The value and the exception both stay out of the log: each embeds the raw value, which may
+      // be a mis-pasted resolved secret.
+      logger.warn(
+          "'{}' is not a parseable URI, so whether it uses plain http under '{}' could not be"
+              + " checked. An unparseable callback URL fails at the first async step either way;"
+              + " fix the value.",
+          SagaServerConfig.CALLBACK_BASE_URL_KEY,
+          SagaServerConfig.TLS_ENABLED_KEY);
+      return;
+    }
+    String host = baseUrl.getHost();
+    if ("http".equalsIgnoreCase(baseUrl.getScheme())
+        && host != null
+        && !LoopbackHost.isLoopback(host)) {
+      logger.warn(
+          "'{}' uses plain http while '{}' is true. If it points back at this server, participants"
+              + " will dial the TLS port over plaintext and fail at handshake on the first async"
+              + " step. Use an https URL, or make sure the URL terminates at separate plaintext"
+              + " infrastructure.",
+          SagaServerConfig.CALLBACK_BASE_URL_KEY,
+          SagaServerConfig.TLS_ENABLED_KEY);
+    }
+  }
+
+  /**
    * Starts background recovery/retention tasks, binds the HTTP port, and begins serving.
    *
    * @return this server
@@ -483,13 +810,26 @@ public final class SagaServer implements AutoCloseable {
     try {
       ensureSecureBindingOrAcknowledged();
       warnIfRateLimitGlobalUnderNoop();
+      warnIfCallbackBaseUrlIsPlaintextUnderTls();
       orchestrator.startBackgroundTasks();
       if (httpServer != null) {
-        httpServer.start(config.host(), config.httpPort());
+        if (config.tlsEnabled()) {
+          // The TLS connector registered in createHttpServer carries host and port itself, and
+          // Javalin silently ignores start(host, port) arguments once a custom connector exists —
+          // passing them here would suggest they do something.
+          httpServer.start();
+        } else {
+          httpServer.start(config.host(), config.httpPort());
+        }
       }
       if (grpcServer != null) {
         grpcServer.start();
         grpcStarted = true;
+      }
+      if (reloadManager != null) {
+        // After the transports: a replica never reloads before it is serving, so a bad candidate
+        // set cannot wedge startup halfway (boot already applied the current set fatally above).
+        reloadManager.start();
       }
     } catch (RuntimeException e) {
       // Stop the (partially started) HTTP/gRPC server and drain/close the orchestrator so a failed
@@ -502,10 +842,31 @@ public final class SagaServer implements AutoCloseable {
       close();
       throw new UncheckedIOException("Failed to start gRPC server on port " + config.grpcPort(), e);
     }
+    if (tlsReloader != null) {
+      // The positive confirmation an operator (and the smoke test) looks for at boot. No path:
+      // like every configured value, a path value is not provably a path — a secret reference
+      // mis-placed on a path key resolves to the secret itself (see TlsMaterial's javadoc).
+      logger.info(
+          "TLS enabled for {}",
+          httpServer != null && grpcServer != null
+              ? "HTTP and gRPC"
+              : httpServer != null ? "HTTP" : "gRPC");
+    }
     logger.info(
         "SagaServer started ({}, {})",
         httpServer == null ? "HTTP disabled" : "HTTP port " + port(),
         grpcServer == null ? "gRPC disabled" : "gRPC port " + grpcPort());
+    // Derived from the pool's actual state, not from "HTTP is enabled": the smoke test greps this
+    // line as its only external evidence, so it has to disappear if the wiring in
+    // createHttpServer ever does. Losing that wiring would otherwise leave every request served
+    // and every probe green while silently restoring the request-pool ceiling it removes — the
+    // same reason the smoke test reads /proc/1/maps rather than trusting that epoll was requested.
+    if (httpServer != null
+        && httpServer.jettyServer().server().getThreadPool()
+            instanceof QueuedThreadPool configuredPool
+        && configuredPool.getVirtualThreadsExecutor() != null) {
+      logger.info("HTTP handlers run on virtual threads");
+    }
     return this;
   }
 
@@ -530,6 +891,32 @@ public final class SagaServer implements AutoCloseable {
     return grpcServer == null ? -1 : grpcServer.getPort();
   }
 
+  /**
+   * Runs one reload pass synchronously; for integration tests, which mutate the watched directories
+   * and need a deterministic pass instead of waiting out the interval.
+   *
+   * @return whether the pass applied (or verified) cleanly
+   */
+  boolean reloadNow() {
+    return reconciler.run();
+  }
+
+  /**
+   * Runs one TLS certificate reload pass synchronously; for integration tests, which rewrite the
+   * certificate files and need a deterministic pass instead of waiting out the interval.
+   */
+  void reloadTlsNow() {
+    Objects.requireNonNull(tlsReloader, "TLS is not enabled").run();
+  }
+
+  /**
+   * Runs one outbound CA bundle reload pass synchronously, for the same reason as {@link
+   * #reloadTlsNow}.
+   */
+  void reloadEgressTrustNow() {
+    Objects.requireNonNull(egressTrust, "No outbound CA bundle is configured").run();
+  }
+
   @Override
   public void close() {
     // Idempotent: start() calls close() on a bind failure, and try-with-resources will call it
@@ -537,20 +924,140 @@ public final class SagaServer implements AutoCloseable {
     if (!closed.compareAndSet(false, true)) {
       return;
     }
-    // Stop accepting new requests on the enabled transports, drain in-flight gRPC calls, then drain
-    // sagas.
-    if (httpServer != null) {
-      httpServer.stop();
+    // The shutdown budget, computed once: every phase below takes what is left of it rather than
+    // starting a clock of its own, so an operator can size a termination grace period from
+    // shutdown.timeout_millis alone. The reload stop and the transport drains share a front slice
+    // of it (frontPhaseMillis); the saga drain gets whatever they leave, and at least the rest.
+    long startNanos = System.nanoTime();
+    long deadlineNanos = startNanos + TimeUnit.MILLISECONDS.toNanos(config.shutdownTimeoutMillis());
+    long frontDeadlineNanos =
+        startNanos
+            + TimeUnit.MILLISECONDS.toNanos(frontPhaseMillis(config.shutdownTimeoutMillis()));
+    // Wake every bounded synchronous start before anything else: each one would otherwise hold its
+    // request until its wait bound elapsed, and a terminating server cannot advance those sagas
+    // anyway. This is what keeps the drains below short enough to fit a grace period.
+    shutdownSignal.complete(null);
+    // Reload stops first, before anything else winds down: a pass that ran during the drain could
+    // swap the endpoint set out from under sagas that are still finishing their current step, and
+    // stopping it here keeps a registration from racing the store's close. That second part is
+    // best effort; stop() waits only until its cap, and warns if a pass outlives it.
+    if (reloadManager != null) {
+      reloadManager.stop(
+          Math.min(
+              frontDeadlineNanos,
+              startNanos + TimeUnit.MILLISECONDS.toNanos(RELOAD_STOP_MAX_MILLIS)));
     }
-    shutdownGrpc();
-    // gRPC does not own the executor we supplied it, so shut it down ourselves. shutdownGrpc() has
-    // already drained in-flight calls, so no tasks remain and a plain shutdown() suffices.
+    // Then stop accepting new requests on the enabled transports and drain in-flight calls, both
+    // transports at once: nothing orders them, and a Jetty stop that ran long would otherwise leave
+    // gRPC none of the slice. Both finish, or are abandoned, before orchestrator.close() closes the
+    // store underneath their handler bodies; that ordering is the one that matters.
+    drainConcurrently(
+        () -> stopHttp(frontDeadlineNanos),
+        () -> shutdownGrpc(frontDeadlineNanos),
+        frontDeadlineNanos);
+    // Neither Jetty nor gRPC stops an executor it was handed, so shut both down ourselves. A gRPC
+    // call cancelled by shutdownNow() leaves its handler body running, like an HTTP straggler, and
+    // a plain shutdown() does not interrupt it; the executor is shut down only so it takes no more
+    // work. For HTTP, awaitTermination is the backstop for a drain that overran: Jetty abandons
+    // those handler bodies without interrupting them, and they must not still be running when the
+    // store closes.
+    if (httpVirtualThreads != null) {
+      shutdownHttpVirtualThreads(httpVirtualThreads, frontDeadlineNanos);
+    }
     if (grpcExecutor != null) {
       grpcExecutor.shutdown();
     }
     closeSecurityProvider(securityProvider);
-    orchestrator.close();
+    orchestrator.close(deadlineNanos);
+    // After the orchestrator has drained, so no participant call is still using the client.
+    shutdownEgressClient(egressClient);
     logger.info("SagaServer stopped");
+  }
+
+  /**
+   * Stops the HTTP server, answering in-flight requests until the deadline; a no-op with HTTP off.
+   */
+  private void stopHttp(long deadlineNanos) {
+    if (httpServer == null) {
+      return;
+    }
+    try {
+      // Jetty runs Graceful.shutdown() from Server.doStop() only when stopTimeout is positive.
+      // Without it, stop() goes straight to stopping the connectors and an in-flight request's
+      // socket dies under it — the caller sees a closed channel rather than its response. The
+      // connector's own Graceful (its endpoint set must empty) tracks those requests, so this
+      // works whether or not the handler body is on a virtual thread.
+      //
+      // Set here rather than at construction, and only for a server that actually started:
+      // gracefully stopping a Jetty that never bound raises a checked ExecutionException, and
+      // Javalin stops the server itself when start() fails to bind — so a stop timeout baked in
+      // at construction replaces a port-in-use error with that, exactly when the operator needs
+      // the real one.
+      org.eclipse.jetty.server.Server jetty = httpServer.jettyServer().server();
+      if (jetty.isRunning()) {
+        jetty.setStopTimeout(remainingMillis(deadlineNanos));
+      }
+      // Blocks until in-flight requests have been answered, or the deadline is spent.
+      httpServer.stop();
+    } catch (Exception e) {
+      // Catch broadly, and deliberately. Two failures land here and neither may abort the drains
+      // that follow: a drain that overruns its window (Jetty ends FAILED, but the connectors are
+      // stopped and the port released), and stopping a server that never bound — start() calls
+      // close() on a bind failure, and gracefully stopping a never-started Jetty raises a checked
+      // ExecutionException that would otherwise replace the bind error the caller needs to see.
+      logger.warn("HTTP drain did not complete cleanly", e);
+    }
+  }
+
+  /**
+   * Runs {@code blockingStop} on a throwaway virtual thread while {@code inlineDrain} runs on the
+   * caller's thread, then waits for that thread until the deadline, even if {@code inlineDrain}
+   * throws. Whatever it has not finished by then is left to it. The thread is deliberately not
+   * drawn from {@code httpVirtualThreads}, which is itself being shut down on this path.
+   *
+   * <p>Package-private so a test can prove the two overlap rather than sum.
+   */
+  static void drainConcurrently(Runnable blockingStop, Runnable inlineDrain, long deadlineNanos) {
+    Thread stopper = Thread.ofVirtual().name("saga-http-drain").start(blockingStop);
+    try {
+      inlineDrain.run();
+    } finally {
+      try {
+        // The Duration overload returns at once for a spent deadline; join(0) would wait forever.
+        stopper.join(Duration.ofNanos(Math.max(0L, deadlineNanos - System.nanoTime())));
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+    }
+  }
+
+  /**
+   * Shuts down the executor that ran the HTTP handler bodies and waits for any that outlived the
+   * Jetty drain, so none is still touching the store when {@link
+   * DefaultSagaOrchestrator#close(long)} closes it. Bounded by the same drain window, and only ever
+   * reached with stragglers after that window already overran, so it logs rather than blocking
+   * shutdown further.
+   *
+   * <p>A straggler past that point is <b>deliberately abandoned</b>, unlike {@link #shutdownGrpc},
+   * which escalates to {@code shutdownNow()}. It is left running and the store closes underneath
+   * it. That is a considered trade rather than an oversight: by then the client's connection is
+   * gone, the saga is persisted, and recovery is the backstop — whereas blocking shutdown further
+   * risks the whole process being killed mid-drain, which loses the sagas still draining below.
+   * Widening the window is the lever here, not escalation.
+   */
+  private void shutdownHttpVirtualThreads(
+      ExecutorService httpVirtualThreads, long drainDeadlineNanos) {
+    httpVirtualThreads.shutdown();
+    // Only what is left of the front slice, not a second one: Jetty's stop has already had it.
+    try {
+      if (!httpVirtualThreads.awaitTermination(
+          remainingMillis(drainDeadlineNanos), TimeUnit.MILLISECONDS)) {
+        logger.warn("HTTP handlers still running after the drain window; closing the store anyway");
+      }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      logger.warn("Interrupted while waiting for HTTP handlers to finish");
+    }
   }
 
   /**
@@ -572,11 +1079,11 @@ public final class SagaServer implements AutoCloseable {
 
   /**
    * Gracefully shuts the gRPC server: mark it {@code NOT_SERVING} for any in-flight health probe,
-   * stop accepting calls, drain in-flight ones up to {@link #grpcDrainMillis()}, then force-cancel
-   * any stragglers. A no-op if gRPC is disabled or the server never started (a built-but-unbound
-   * server holds no resources).
+   * stop accepting calls, drain in-flight ones until the deadline, then force-cancel any
+   * stragglers. A no-op if gRPC is disabled or the server never started (a built-but-unbound server
+   * holds no resources).
    */
-  private void shutdownGrpc() {
+  private void shutdownGrpc(long deadlineNanos) {
     Server server = grpcServer;
     if (server == null || !grpcStarted) {
       return;
@@ -586,7 +1093,7 @@ public final class SagaServer implements AutoCloseable {
     }
     server.shutdown();
     try {
-      if (!server.awaitTermination(grpcDrainMillis(), TimeUnit.MILLISECONDS)) {
+      if (!server.awaitTermination(remainingMillis(deadlineNanos), TimeUnit.MILLISECONDS)) {
         server.shutdownNow();
       }
     } catch (InterruptedException e) {
@@ -596,20 +1103,48 @@ public final class SagaServer implements AutoCloseable {
   }
 
   /**
-   * The graceful gRPC drain window (ms). Derived from {@code sync.max_wait_millis} so an in-flight
-   * bounded-sync {@code StartSaga}/{@code AwaitSaga} call can reach its own wait ceiling before we
-   * force-cancel it: a fixed 30s drain would cut a legitimate 60s (default) wait in half, and the
-   * gap would widen further whenever an operator raises {@code sync.max_wait_millis}. Kept at a
-   * {@value #GRPC_SHUTDOWN_MIN_SECONDS}s floor for small ceilings, and padded with {@value
-   * #GRPC_SHUTDOWN_SLACK_MILLIS}ms of slack so the call unwinds before the deadline rather than at
-   * it.
+   * The front phase's slice (ms) of the shutdown budget: half of it, capped at {@value
+   * #FRONT_PHASE_MAX_MILLIS}ms. The reload stop and both transport drains share it, and the saga
+   * drain is guaranteed the rest. The transports need no window of their own sized to {@code
+   * sync.max_wait_millis}: the first thing {@code close()} does is wake every bounded synchronous
+   * waiter, so at shutdown no start waits on that bound any more, and what remains per request is
+   * one store read and one response write. An admin inline drive is the exception, as {@code
+   * adminDriveDeadlineMillis()} says: shutdown does not wake it, and one in flight holds its
+   * request until its saga settles or the slice ends. The half keeps the reserve meaningful at a
+   * small budget; the cap keeps a large budget, sized for long sagas under {@code WAIT_ALL_SAGAS},
+   * from handing the transports time they cannot use.
    *
-   * <p>Package-private for testing the derivation without binding a port or shutting down a server.
+   * <p>Package-private for testing the split without binding a port or shutting down a server.
    */
-  long grpcDrainMillis() {
-    return Math.max(
-        TimeUnit.SECONDS.toMillis(GRPC_SHUTDOWN_MIN_SECONDS),
-        config.syncMaxWaitMillis() + GRPC_SHUTDOWN_SLACK_MILLIS);
+  static long frontPhaseMillis(long shutdownTimeoutMillis) {
+    return Math.min(shutdownTimeoutMillis / 2, FRONT_PHASE_MAX_MILLIS);
+  }
+
+  private static long remainingMillis(long deadlineNanos) {
+    return Math.max(0L, TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime()));
+  }
+
+  /**
+   * The boot guard's message, shared with {@code --validate-config} so the offline check and the
+   * guard it mirrors cannot come to say different things. The rule is the server's, not the reload
+   * pass's — the pass rejects only a wind-down to zero, which a first pass is not — so it is stated
+   * here and quoted there. It names the place that was searched: the default directory when the key
+   * is unset (a constant, safe to echo), or the key itself when the operator named a path (a
+   * configured value, never echoed, like every other).
+   */
+  static String noDefinitionsMessage(SagaServerConfig config) {
+    if (config.definitionsPathDefaulted()) {
+      return "No saga definitions registered: '"
+          + SagaServerConfig.DEFINITIONS_PATH_KEY
+          + "' is not set, and the default directory "
+          + SagaServerConfig.DEFAULT_DEFINITIONS_PATH
+          + " is absent or holds no definition file (.json, .yaml or .yml). Mount the definitions"
+          + " there, or set the key to a file or directory holding at least one.";
+    }
+    return "No saga definitions registered: the file or directory named by '"
+        + SagaServerConfig.DEFINITIONS_PATH_KEY
+        + "' holds no saga definition (.json, .yaml or .yml). Add one there, or point the key at a"
+        + " file or directory holding at least one.";
   }
 
   /**

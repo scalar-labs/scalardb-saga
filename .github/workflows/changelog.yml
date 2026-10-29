@@ -1,0 +1,70 @@
+name: Changelog
+
+# A pull request whose title promises a change users can see (feat: or fix:) adds a changie entry to
+# .changes/unreleased/, which the release collects into CHANGELOG.md; see "Changelog" in
+# RELEASING.md. The entry is a file of its own, never an edit to CHANGELOG.md, so Auto-PR's
+# cherry-pick carries it to a release line without conflicting or landing in a section that line has
+# already released.
+#
+# Its own workflow rather than a step in ci.yml, because the title and the labels are inputs too:
+# editing either has to re-run this check, and re-running the whole build for it would be waste.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  entry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      # The merge commit and its parents: its first parent is the base the pull request merges onto.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+
+      - uses: ./.github/actions/setup-changie
+
+      # Every pending entry, not only this pull request's: a malformed one fails `changie batch` at
+      # release time, and finding out there is too late. changie refuses an unknown kind or broken
+      # YAML by itself, but accepts an entry with no body, which renders as a bare `- `, or as just
+      # its pull request link when it has one; both are checked here.
+      - name: Check the pending entries are valid
+        run: |
+          set -euo pipefail
+          rendered=$(changie batch v0.0.0 --dry-run)
+          if grep -Eqx -- '- *( \(\[#[0-9]+\]\([^)]*\)\))? *' <<< "${rendered}"; then
+            echo "::error::an entry in .changes/unreleased/ has no body"
+            exit 1
+          fi
+
+      # Through env, never interpolated into the script: a pull request title is untrusted input.
+      - name: Check a user-facing pull request adds an entry
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+          SKIP: ${{ contains(github.event.pull_request.labels.*.name, 'no-changelog') }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${TITLE}" =~ ^(feat|fix)(\([^\)]*\))?!?:\  ]]; then
+            echo "Not a feat: or fix: pull request; no entry is required"
+            exit 0
+          fi
+          if [ "${SKIP}" = "true" ]; then
+            echo "Labelled no-changelog; no entry is required"
+            exit 0
+          fi
+          added=$(git diff --name-only --diff-filter=A HEAD^1 HEAD -- '.changes/unreleased/*.yaml')
+          if [ -z "${added}" ]; then
+            echo "::error::a feat: or fix: pull request needs a changelog entry. Run \`changie new\`" \
+              "and commit the file it writes (see \"Changelog\" in RELEASING.md), or add the" \
+              "no-changelog label if users cannot see the change."
+            exit 1
+          fi
+          echo "Entry added: ${added}"
