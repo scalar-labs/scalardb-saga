@@ -1,3 +1,0 @@
-kind: enhancement
-body: The Java client SDK, `scalardb-saga-java-client-sdk`, runs on Java 8 or later. In embedded mode, `scalardb-saga-core` runs the engine inside a Java 25 application instead, where a step can also be a Java class.
-time: 2026-10-28T20:04:32.87542+09:00

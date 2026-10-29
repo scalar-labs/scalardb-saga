@@ -1,3 +1,0 @@
-kind: enhancement
-body: Operators can list sagas, and recover, force-complete, or reset a saga that the engine escalated, through an admin API. Every error carries a `DB-SAGA-` status code, listed with its cause and the action to take in `guides/scalardb-saga-status-codes.md`.
-time: 2026-10-28T20:04:32.885796+09:00

@@ -1,3 +1,0 @@
-kind: enhancement
-body: Sagas are defined in JSON or YAML, with each step calling an HTTP service. A step can wait for a slow participant, which reports back through a callback URL.
-time: 2026-10-28T20:04:32.859777+09:00

@@ -1,3 +1,0 @@
-kind: enhancement
-body: First release of ScalarDB Saga, which coordinates a transaction that spans several services as a saga. Each step calls a service, and when a step fails, the steps already completed are undone by their compensations, in reverse order. A `TCC` mode reserves resources first and confirms them only once every reservation succeeds. Saga state is stored in your database through ScalarDB, so a saga that a stopped server left unfinished is recovered.
-time: 2026-10-28T20:04:32.850861+09:00

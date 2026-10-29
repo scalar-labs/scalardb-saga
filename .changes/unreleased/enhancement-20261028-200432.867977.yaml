@@ -1,3 +1,0 @@
-kind: enhancement
-body: The ScalarDB Saga server, shipped as the container image `ghcr.io/scalar-labs/scalardb-saga-server`, runs sagas behind a REST API and a gRPC API. It authenticates callers by API key or JWT, serves TLS on both, and reloads definitions, service files, and certificates without a restart. `--validate-config` checks a configuration before it ships.
-time: 2026-10-28T20:04:32.867977+09:00
