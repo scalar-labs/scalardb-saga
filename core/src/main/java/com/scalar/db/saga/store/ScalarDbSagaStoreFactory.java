@@ -43,8 +43,8 @@ import org.slf4j.LoggerFactory;
  * <ul>
  *   <li>{@code scalar.db.saga.store.max_event_payload_bytes} — maximum event payload size in bytes
  *       ({@code 0} = no limit, default: {@code 0})
- *   <li>{@code scalar.db.saga.store.transaction_retry_count} — max transaction retry attempts
- *       (default: {@code 3})
+ *   <li>{@code scalar.db.saga.store.transaction_max_attempts} — how many times a store transaction
+ *       is attempted, including the first (default: {@code 3})
  * </ul>
  *
  * <p>Keys under {@code scalar.db.saga.store.scalardb.} are specific to this ScalarDB-backed store:
@@ -76,7 +76,7 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
   private static final Set<String> KNOWN_KEYS =
       Set.of(
           PROP_PREFIX + "max_event_payload_bytes",
-          PROP_PREFIX + "transaction_retry_count",
+          PROP_PREFIX + "transaction_max_attempts",
           SCALARDB_PREFIX + "num_buckets");
 
   /**
@@ -235,9 +235,9 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
     if (maxPayload != null) {
       builder.maxEventPayloadBytes(parseIntProperty("max_event_payload_bytes", maxPayload));
     }
-    String retryCount = properties.getProperty(PROP_PREFIX + "transaction_retry_count");
-    if (retryCount != null) {
-      builder.transactionRetryCount(parseIntProperty("transaction_retry_count", retryCount));
+    String maxAttempts = properties.getProperty(PROP_PREFIX + "transaction_max_attempts");
+    if (maxAttempts != null) {
+      builder.transactionMaxAttempts(parseIntProperty("transaction_max_attempts", maxAttempts));
     }
     String numBuckets = properties.getProperty(SCALARDB_PREFIX + "num_buckets");
     if (numBuckets != null) {
@@ -291,6 +291,16 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
               + "' has been removed; it is now an internal page size. Delete the key. To pace"
               + " recovery, size RecoveryConfig.maxRecoveriesPerSweep instead (daemon key:"
               + " scalar.db.saga.server.recovery.max_recoveries_per_sweep).");
+    }
+    String retryCount = PROP_PREFIX + "transaction_retry_count";
+    if (properties.getProperty(retryCount) != null) {
+      throw new IllegalArgumentException(
+          "'"
+              + retryCount
+              + "' has been renamed to '"
+              + PROP_PREFIX
+              + "transaction_max_attempts', since the value counts attempts, including the first,"
+              + " not retries. Rename the key; the value keeps its meaning.");
     }
   }
 

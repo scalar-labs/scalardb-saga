@@ -1517,7 +1517,7 @@ public final class ScalarDbSagaStore implements SagaStore {
       String operationName,
       boolean retryOnConflict,
       @Nullable String sagaId) {
-    int maxAttempts = config.getTransactionRetryCount();
+    int maxAttempts = config.getTransactionMaxAttempts();
     Exception lastException = null;
 
     for (int attempt = 0; attempt < maxAttempts; attempt++) {
