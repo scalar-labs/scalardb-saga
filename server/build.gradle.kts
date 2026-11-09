@@ -222,3 +222,13 @@ tasks.register<Exec>("dockerBuild") {
         },
     )
 }
+
+// The shared Scalar vulnerability-check workflow builds every image with `./gradlew docker`. Without
+// a task of that exact name, Gradle reads `docker` as an abbreviation that matches both dockerBuild
+// and dockerContext, and the build fails as ambiguous.
+tasks.register("docker") {
+    description = "Alias of dockerBuild for the shared vulnerability-check workflow."
+    group = "distribution"
+
+    dependsOn("dockerBuild")
+}
