@@ -20,7 +20,7 @@
 #
 # Ubuntu resolute (26.04) underneath because it is the current Ubuntu LTS. Like the JRE major, moving
 # to the next one is a deliberate manual change.
-FROM eclipse-temurin:25.0.4.1_1-jre-resolute@sha256:acd83cdf6c9b5bfcd7c4e9d3e1969bacaacdcfa034c074500ab28610fb840f81
+FROM eclipse-temurin:25.0.5_8-jre-resolute@sha256:b6e00330337143a2c1a20f1c1c693d4b6ce9a3c30ade8b9d03fc68cc9e3871e7
 
 # Two things in one layer, since each `RUN` is a layer and neither is worth its own:
 #
@@ -44,13 +44,6 @@ RUN export DEBIAN_FRONTEND=noninteractive \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --system --gid 201 scalardb \
  && useradd --system --uid 201 --gid 201 --no-create-home --shell /usr/sbin/nologin scalardb
-
-# Temporary fix for https://emudhra.we-have-a-problem.com/
-# We can remove this RUN after we update to the fixed version of Java.
-RUN keytool -delete -cacerts -storepass changeit -alias "cn_emsign_ecc_root_ca__g3,o_emudhra_technologies_limited,ou_emsign_pki,c_in [jdk]" \
- && keytool -delete -cacerts -storepass changeit -alias "cn_emsign_root_ca__g1,o_emudhra_technologies_limited,ou_emsign_pki,c_in [jdk]" \
- && keytool -delete -cacerts -storepass changeit -alias "cn_emsign_ecc_root_ca__c3,o_emudhra_inc,ou_emsign_pki,c_us [jdk]" \
- && keytool -delete -cacerts -storepass changeit -alias "cn_emsign_root_ca__c1,o_emudhra_inc,ou_emsign_pki,c_us [jdk]"
 
 WORKDIR /scalardb-saga
 
@@ -78,11 +71,6 @@ COPY conf/ ./conf/
 # above. /licenses is where the Red Hat/OpenShift convention looks, and a predictable location
 # regardless of platform.
 COPY LICENSE THIRD-PARTY-NOTICES.txt /licenses/
-
-# Temporary fix for https://emudhra.we-have-a-problem.com/
-# Users can run `java CheckCerts` in the WORKDIR to confirm that the compromised CA certificates are
-# not trusted. We can remove this COPY after we update to the fixed version of Java.
-COPY CheckCerts.class CheckCerts.java ./
 
 USER 201:201
 
