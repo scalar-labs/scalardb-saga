@@ -39,6 +39,10 @@ updates:
 
   # `/` covers only .github/workflows; the composite actions under .github/actions are listed
   # separately, or the actions they call would never be bumped.
+  # hadolint-action is kept out of the group and arrives as its own PR: the action's image pins the
+  # hadolint version, so a bump of it is a bump of the linter, and one whose new rules fail the
+  # dockerfile-lint job would otherwise hold every other action's update hostage in the same PR.
+  # It does not get a one-member group of its own, for the reason given on the docker entry below.
   - package-ecosystem: github-actions
     directories: ["/", "/.github/actions/*"]
     schedule:
@@ -47,11 +51,18 @@ updates:
       actions:
         patterns:
           - "*"
+        exclude-patterns:
+          - "hadolint/hadolint-action"
 
   # Keeps the digest-pinned base image in the server Dockerfile current. Without this the pin would
-  # quietly rot, and the image would ship an ever-older Ubuntu and JRE.
+  # quietly rot, and the image would ship an ever-older Ubuntu and JRE. When a Dockerfile is added
+  # anywhere else, list its directory here and in every docker entry of the release-branch section
+  # below: Dependabot reads nothing it is not pointed at. There is no `groups:` block while this is
+  # the only Dockerfile: a group with one member only replaces "bump eclipse-temurin from X to Y" in
+  # the PR title with the name of the group. Add one as soon as a second Dockerfile is listed, so a
+  # base-image respin stays one PR per branch instead of one per directory.
   - package-ecosystem: docker
-    directory: /server/docker
+    directories: ["/server/docker"]
     schedule:
       interval: weekly
     ignore:
@@ -63,14 +74,19 @@ updates:
       - dependency-name: "eclipse-temurin"
         update-types: ["version-update:semver-major"]
 
-  # --- Release branches: github-actions only ---
-  # Gradle and Docker bumps deliberately have no target-branch copies: they land on main once and
-  # reach the release lines as Auto-PR cherry-pick backports (.github/workflows/auto-pr.yml),
-  # driven by the family-shared "ScalarDB <version>" projects attached to the merged PR — the same model the
-  # other Scalar repositories use. One bump, one review, per-line backport PRs generated on merge.
-  # Workflow files are the exception: they drift between lines (each branch's CI evolves
-  # separately), so a cherry-pick of a workflow bump conflicts more often than it applies, and each
-  # line keeps its own github-actions entry instead.
+  # --- Release branches: github-actions and docker ---
+  # Gradle bumps deliberately have no target-branch copies: they land on main once and reach the
+  # release lines as Auto-PR cherry-pick backports (.github/workflows/auto-pr.yml), driven by the
+  # family-shared "ScalarDB <version>" projects attached to the merged PR — the same model the other
+  # Scalar repositories use. One bump, one review, per-line backport PRs generated on merge.
+  # Two ecosystems are the exception, and each line keeps its own entry for them instead:
+  # - Workflow files drift between lines (each branch's CI evolves separately), so a cherry-pick of a
+  #   workflow bump conflicts more often than it applies.
+  # - The base image is per-line state. A line stays on the JRE major and Ubuntu code name it
+  #   released with (3.19 sat on Temurin 21 while main was already on 25), so main's digest bump
+  #   names a tag the line does not use and is nothing a cherry-pick can carry across; and the
+  #   security rebuilds of the line's own tag only ever reach it through an entry that resolves
+  #   that tag. Each docker entry repeats the main entry's ignore rule, for the same reason.
   - package-ecosystem: github-actions
     directories: ["/", "/.github/actions/*"]
     target-branch: "3"
@@ -80,6 +96,17 @@ updates:
       actions:
         patterns:
           - "*"
+        exclude-patterns:
+          - "hadolint/hadolint-action"
+
+  - package-ecosystem: docker
+    directories: ["/server/docker"]
+    target-branch: "3"
+    schedule:
+      interval: weekly
+    ignore:
+      - dependency-name: "eclipse-temurin"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directories: ["/", "/.github/actions/*"]
@@ -90,16 +117,32 @@ updates:
       actions:
         patterns:
           - "*"
+        exclude-patterns:
+          - "hadolint/hadolint-action"
 
-  # The entries without a `target-branch` cover the default branch; the github-actions blocks after
-  # them cover one release branch each. A version branch receives no workflow updates until it is
-  # named by a `target-branch`, so when a release branch is cut, add a copy of the github-actions
-  # entry naming it (the family-shared "ScalarDB <version>" project for the line normally already
-  # exists, created by the ScalarDB release cycle, so gradle and Docker bumps reach it as backports) — and delete the block again when the line reaches end of life.
+  - package-ecosystem: docker
+    directories: ["/server/docker"]
+    target-branch: "3.20"
+    schedule:
+      interval: weekly
+    ignore:
+      - dependency-name: "eclipse-temurin"
+        update-types: ["version-update:semver-major"]
+
+  # The entries without a `target-branch` cover the default branch; the github-actions and docker
+  # blocks after them cover one release branch each. A version branch receives no workflow or
+  # base-image updates until it is named by a `target-branch`, so when a release branch is cut, add
+  # a copy of the github-actions entry and of the docker entry naming it (the family-shared
+  # "ScalarDB <version>" project for the line normally already exists, created by the ScalarDB
+  # release cycle, so gradle bumps reach it as backports) — and delete both blocks again when the
+  # line reaches end of life.
   # Entries naming a branch that does not yet exist produce errors, which is why they are not
   # written ahead of time. Re-indent as you paste: an off-by-two does not disable one entry, it
   # makes the whole file unparseable, which stops every update on every branch at once, silently.
   #
   # Known limitation: Dependabot *security* updates only ever target the default branch. That is
   # now the working model rather than a gap — the security bump merges on main and its backport PRs
-  # carry it to every line whose project is attached.
+  # carry it to every line whose project is attached. The base image has nothing to miss here:
+  # the advisory database covers no Docker ecosystem, so no security update ever targets a
+  # Dockerfile, on main or anywhere else. What keeps a line's base image patched is the digest
+  # rebuild of its tag, which the per-branch entries deliver as that line's version update.

@@ -218,21 +218,23 @@ git tag v<version> && git push origin v<version>
    the ScalarDB family — the same numbering, the same objects `scalardb` and `scalardb-cluster`
    use — so the ScalarDB release cycle normally creates them and there is nothing to create here;
    only confirm the project for the line's next release exists (a `a.b.c` title with `c > 0` maps
-   to branch `a.b`; `a.b.0` maps to the major branch `a`; `a.0.0` maps to `main`). Gradle and
-   Docker dependency bumps land on `main` only, and the Auto-PR workflow
+   to branch `a.b`; `a.b.0` maps to the major branch `a`; `a.0.0` maps to `main`). Gradle
+   dependency bumps land on `main` only, and the Auto-PR workflow
    ([.github/workflows/auto-pr.yml](.github/workflows/auto-pr.yml)) opens a cherry-pick backport
    PR on every line whose project is attached to the merged PR — so a merged PR nobody attached a
    project to backports nowhere. A conflicting cherry-pick still opens a draft PR with resolution
    instructions rather than being dropped.
 
-   Second, workflow files drift between lines (each branch's CI evolves separately), so
-   `github-actions` bumps stay per-branch instead of being backported. **On `main`, through a pull
-   request**, copy the `github-actions` entry in
-   [.github/dependabot.yml](.github/dependabot.yml) to the release-branch section at the end of the
-   file, adding `target-branch: "1.0"` — substituting the branch you just cut — and delete the copy
-   again when that line reaches end of life. Dependabot reads the file from the default branch
-   only, so a line gets no workflow updates until an entry names it. Copy the whole entry rather
-   than retyping it, so the `groups:` block comes along.
+   Second, two ecosystems stay per-branch instead of being backported: workflow files drift
+   between lines (each branch's CI evolves separately), and the server image's base image is
+   per-line state (a line stays on the JRE major it released with, so a digest bump on `main` names
+   a tag the line does not use). **On `main`, through a pull request**, copy the `github-actions`
+   entry and the `docker` entry in [.github/dependabot.yml](.github/dependabot.yml) to the
+   release-branch section at the end of the file, adding `target-branch: "1.0"` to each —
+   substituting the branch you just cut — and delete both copies again when that line reaches end
+   of life. Dependabot reads the file from the default branch only, so a line gets no workflow or
+   base-image updates until an entry names it. Copy the whole entries rather than retyping them, so
+   the `groups:` and `ignore:` blocks come along.
 
    A repository ruleset covering version branches is worth having before one is cut, for the same
    reason `main` has one: a release is built from the commit the tag names, and the workflow's check
