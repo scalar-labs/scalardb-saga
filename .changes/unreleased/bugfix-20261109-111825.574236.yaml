@@ -1,0 +1,5 @@
+kind: bugfix
+body: The ScalarDB Saga Server container image is now based on Eclipse Temurin 25.0.5_8, which no longer trusts the compromised emSign root CAs (CVE-2026-91403, CVE-2026-114820).
+time: 2026-11-09T11:18:25.574236+09:00
+custom:
+    PR: "231"
