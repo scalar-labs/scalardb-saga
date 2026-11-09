@@ -1,0 +1,39 @@
+name: Vulnerability check
+
+# Builds the server image from a ref and scans it with Trivy through the reusable workflow every Scalar
+# product shares, so findings reach the same Slack channel under the same policy: CRITICAL and HIGH,
+# fixed upstream only. The scheduled workflow calls this file on each maintained branch so that every
+# line scans with its own copy; run it by hand to scan the branch it is dispatched from.
+on:
+  workflow_call:
+    inputs:
+      target-ref:
+        description: Ref (branch, tag or release) to scan
+        required: true
+        type: string
+      find-latest-release:
+        description: Scan the latest release whose name starts with target-ref instead of target-ref itself
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      SLACK_SECURITY_WEBHOOK_URL:
+        required: false
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  vuln-check:
+    uses: scalar-labs/actions/.github/workflows/vuln-check-reusable.yaml@main
+    with:
+      target-ref: ${{ inputs.target-ref || github.ref_name }}
+      find-latest-release: ${{ inputs.find-latest-release || false }}
+      images: '[["ScalarDB Saga Server", "scalardb-saga-server"]]'
+      # The image tag is the project version; there is no :common project to ask Gradle for it.
+      version-command: "sed -n 's/^version=//p' gradle.properties"
+      # The build runs on Java 25; the Java 8 modules compile through Gradle toolchains.
+      java-versions: "25"
+    secrets:
+      SLACK_SECURITY_WEBHOOK_URL: ${{ secrets.SLACK_SECURITY_WEBHOOK_URL }}
