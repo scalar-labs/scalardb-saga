@@ -111,7 +111,7 @@ Any route can answer with the following codes, so the tables for each route leav
 | `500` | `DB-SAGA-30001`, `DB-SAGA-30002`, `DB-SAGA-39999` | The server failed. Retrying does not help. |
 | `503` | `DB-SAGA-20002`, `DB-SAGA-20003`, `DB-SAGA-20005` | The store or the identity provider is unavailable, or the server stopped the operation while shutting down. Retry with backoff. |
 
-Every `GET` route also answers `HEAD`, with the same status and headers and no body. A `HEAD`
+Every `GET` route also answers `HEAD`, with the same status and content type and no body. A `HEAD`
 request needs the same credential and role as the `GET`.
 
 ## Start a saga

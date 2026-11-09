@@ -1,18 +1,22 @@
 package com.scalar.db.saga.server.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.scalar.db.saga.api.SagaAdminService;
+import com.scalar.db.saga.api.SagaPage;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.server.SagaWaiterRegistry;
 import com.scalar.db.saga.server.security.SagaAuthRequest;
+import com.scalar.db.saga.server.security.SagaAuthenticationException;
 import com.scalar.db.saga.server.security.SagaIdentity;
 import com.scalar.db.saga.server.security.SagaRole;
 import com.scalar.db.saga.server.security.SagaSecurityHandler;
@@ -25,6 +29,7 @@ import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.time.Instant;
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import org.junit.jupiter.api.AfterEach;
@@ -48,6 +53,7 @@ class HeadMethodTest {
   private final HttpClient http = HttpClient.newHttpClient();
   private final GrantingProvider provider = new GrantingProvider();
   private final DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
+  private final SagaAdminService adminService = mock(SagaAdminService.class);
   private Javalin app;
 
   @BeforeEach
@@ -57,6 +63,8 @@ class HeadMethodTest {
         .thenReturn(
             new SagaStateSnapshot(EXISTING, "transfer", SagaStatus.COMPLETED, "v1", now, now));
     when(orchestrator.getStateSnapshot(MISSING)).thenThrow(new SagaNotFoundException(MISSING));
+    when(orchestrator.adminService()).thenReturn(adminService);
+    when(adminService.listSagas(any())).thenReturn(new SagaPage<>(List.of(), null));
     app =
         Javalin.create(
             cfg -> {
@@ -69,6 +77,7 @@ class HeadMethodTest {
                   0L,
                   new CompletableFuture<>(),
                   new SagaWaiterRegistry());
+              SagaAdminResource.register(cfg.routes, orchestrator, 0L);
               // A route registered with no operation, to prove HEAD meets the same fail-closed
               // rejection of an untagged route as GET does.
               cfg.routes.get("/untagged", ctx -> ctx.result("should never be served"));
@@ -149,6 +158,50 @@ class HeadMethodTest {
   }
 
   @Test
+  void head_withoutCredential_returns401WithoutRunningHandler() throws Exception {
+    // Arrange — the caller presents no valid credential
+    provider.authenticated = false;
+
+    // Act
+    HttpResponse<String> response = send("HEAD", "/sagas/" + EXISTING);
+
+    // Assert — HEAD is authenticated like GET, before any handler runs
+    assertThat(response.statusCode()).isEqualTo(401);
+    verify(orchestrator, never()).getStateSnapshot(EXISTING);
+  }
+
+  @Test
+  void head_adminListWithReadRoleOnly_returns403WithoutRunningHandler() throws Exception {
+    // Arrange — READ is enough for the saga reads, not for the admin list
+    provider.granted = EnumSet.of(SagaRole.READ);
+
+    // Act
+    HttpResponse<String> response = send("HEAD", "/sagas");
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(403);
+    verify(adminService, never()).listSagas(any());
+  }
+
+  @Test
+  void head_adminListWithAdminRole_runsListHandlerAndAnswersLikeGet() throws Exception {
+    // Arrange
+    provider.granted = EnumSet.of(SagaRole.ADMIN);
+
+    // Act
+    HttpResponse<String> head = send("HEAD", "/sagas");
+    HttpResponse<String> get = send("GET", "/sagas");
+
+    // Assert — the list handler ran for the HEAD too, and HEAD mirrors GET without a body
+    verify(adminService, times(2)).listSagas(any());
+    assertThat(head.statusCode()).isEqualTo(200).isEqualTo(get.statusCode());
+    assertThat(head.headers().firstValue("Content-Type"))
+        .isPresent()
+        .isEqualTo(get.headers().firstValue("Content-Type"));
+    assertThat(head.body()).isEmpty();
+  }
+
+  @Test
   void head_untaggedRoute_returns500() throws Exception {
     // Act
     HttpResponse<String> response = send("HEAD", "/untagged");
@@ -175,12 +228,16 @@ class HeadMethodTest {
         BodyHandlers.ofString());
   }
 
-  /** A provider that authenticates every caller with the roles the test sets. */
+  /** A provider that authenticates callers, or refuses them, with the roles the test sets. */
   private static final class GrantingProvider implements SagaSecurityProvider {
     private volatile Set<SagaRole> granted = EnumSet.allOf(SagaRole.class);
+    private volatile boolean authenticated = true;
 
     @Override
     public SagaIdentity authenticate(SagaAuthRequest request) {
+      if (!authenticated) {
+        throw new SagaAuthenticationException("no credential");
+      }
       return SagaIdentity.of("test", granted);
     }
 
