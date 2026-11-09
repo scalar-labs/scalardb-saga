@@ -90,13 +90,17 @@ class TransportPolicyParityTest {
   private static final Map<String, SagaOperation> EXPECTED_REST_ROUTES =
       Map.ofEntries(
           Map.entry("GET /health", SagaOperation.HEALTH),
+          Map.entry("HEAD /health", SagaOperation.HEALTH),
           Map.entry("POST /sagas/{id}/steps/{stepName}/complete", SagaOperation.CALLBACK),
           Map.entry("POST /sagas/{id}/steps/{stepName}/fail", SagaOperation.CALLBACK),
           Map.entry("POST /sagas", SagaOperation.START_SAGA),
           Map.entry("PUT /sagas/{id}", SagaOperation.START_SAGA),
           Map.entry("GET /sagas/{id}", SagaOperation.GET_SAGA),
+          Map.entry("HEAD /sagas/{id}", SagaOperation.GET_SAGA),
           Map.entry("GET /sagas", SagaOperation.LIST_SAGAS),
+          Map.entry("HEAD /sagas", SagaOperation.LIST_SAGAS),
           Map.entry("GET /sagas/{id}/detail", SagaOperation.GET_SAGA_DETAIL),
+          Map.entry("HEAD /sagas/{id}/detail", SagaOperation.GET_SAGA_DETAIL),
           Map.entry("POST /sagas/{id}/recover", SagaOperation.RECOVER_SAGA),
           Map.entry("POST /sagas/{id}/force-complete", SagaOperation.FORCE_COMPLETE),
           Map.entry("POST /sagas/{id}/reset", SagaOperation.RESET_ESCALATED),
@@ -201,6 +205,16 @@ class TransportPolicyParityTest {
     assertThat(registered)
         .as("every REST route must carry the expected operation")
         .containsExactlyInAnyOrderEntriesOf(EXPECTED_REST_ROUTES);
+    // A GET route without its own HEAD handler answers HEAD with a bare 200 and never runs the
+    // handler, so every GET route must register HEAD too, under the same operation.
+    registered.forEach(
+        (route, operation) -> {
+          if (route.startsWith("GET ")) {
+            assertThat(registered.get("HEAD " + route.substring("GET ".length())))
+                .as("%s must also be registered on HEAD with the same operation", route)
+                .isEqualTo(operation);
+          }
+        });
   }
 
   /**

@@ -2,8 +2,15 @@ package com.scalar.db.saga.server.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
+import com.scalar.db.saga.api.SagaStateSnapshot;
+import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
+import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.server.SagaWaiterRegistry;
 import com.scalar.db.saga.server.security.SagaAuthRequest;
 import com.scalar.db.saga.server.security.SagaIdentity;
@@ -16,8 +23,10 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
+import java.time.Instant;
 import java.util.EnumSet;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -25,19 +34,29 @@ import org.junit.jupiter.api.Test;
 /**
  * Pins HEAD handling across the real REST routes, end-to-end against a live Javalin dispatch.
  *
- * <p>Javalin answers a HEAD to a GET route from the GET handler and gives it the GET route's roles,
- * so a HEAD is served, authenticated and authorized exactly like its GET. This locks that in at
- * runtime, which {@code TransportPolicyParityTest} cannot, since it inspects registered endpoint
- * metadata rather than per-method dispatch.
+ * <p>A HEAD must run the GET route's handler, under the GET route's operation, and answer with the
+ * GET's status and headers and no body. Javalin alone answers a HEAD on a GET route with a bare
+ * {@code 200} without running the handler, so these tests check the handler actually ran and
+ * compare HEAD with GET, including on a missing saga. {@code TransportPolicyParityTest} checks the
+ * registrations; only a live dispatch shows what a request gets back.
  */
 class HeadMethodTest {
 
+  private static final String EXISTING = "saga-1";
+  private static final String MISSING = "missing";
+
   private final HttpClient http = HttpClient.newHttpClient();
   private final GrantingProvider provider = new GrantingProvider();
+  private final DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
   private Javalin app;
 
   @BeforeEach
   void setUp() {
+    Instant now = Instant.ofEpochSecond(1_700_000_000L);
+    when(orchestrator.getStateSnapshot(EXISTING))
+        .thenReturn(
+            new SagaStateSnapshot(EXISTING, "transfer", SagaStatus.COMPLETED, "v1", now, now));
+    when(orchestrator.getStateSnapshot(MISSING)).thenThrow(new SagaNotFoundException(MISSING));
     app =
         Javalin.create(
             cfg -> {
@@ -46,9 +65,9 @@ class HeadMethodTest {
               HealthResource.register(cfg.routes);
               SagaResource.register(
                   cfg.routes,
-                  mock(DefaultSagaOrchestrator.class),
+                  orchestrator,
                   0L,
-                  new java.util.concurrent.CompletableFuture<>(),
+                  new CompletableFuture<>(),
                   new SagaWaiterRegistry());
               // A route registered with no operation, to prove HEAD meets the same fail-closed
               // rejection of an untagged route as GET does.
@@ -67,41 +86,66 @@ class HeadMethodTest {
   }
 
   @Test
-  void head_healthProbe_returns200() throws Exception {
+  void head_healthProbe_answersLikeGetWithoutBody() throws Exception {
     // Arrange — a probe carries no credential that grants any role
     provider.granted = EnumSet.noneOf(SagaRole.class);
 
     // Act — a load balancer or uptime monitor probing liveness with HEAD
-    HttpResponse<String> response = send("HEAD", "/health");
+    HttpResponse<String> head = send("HEAD", "/health");
+    HttpResponse<String> get = send("GET", "/health");
 
-    // Assert — served like GET, exempt from auth, with the body stripped for HEAD
-    assertThat(response.statusCode()).isEqualTo(200);
-    assertThat(response.body()).isEmpty();
+    // Assert — exempt from auth, with the GET's status and content type and no body
+    assertThat(head.statusCode()).isEqualTo(200);
+    assertThat(head.headers().firstValue("Content-Type"))
+        .isPresent()
+        .isEqualTo(get.headers().firstValue("Content-Type"));
+    assertThat(head.body()).isEmpty();
   }
 
   @Test
-  void head_getRouteWithRequiredRole_isServedLikeGet() throws Exception {
+  void head_existingSagaWithRequiredRole_runsGetHandlerAndAnswersLikeGet() throws Exception {
     // Arrange
     provider.granted = EnumSet.of(SagaRole.READ);
 
-    // Act — HEAD on a route that only registers GET
-    HttpResponse<String> response = send("HEAD", "/sagas/saga-1");
+    // Act
+    HttpResponse<String> head = send("HEAD", "/sagas/" + EXISTING);
+    HttpResponse<String> get = send("GET", "/sagas/" + EXISTING);
 
-    // Assert — the GET handler answers, with the body stripped for HEAD
-    assertThat(response.statusCode()).isEqualTo(200);
-    assertThat(response.body()).isEmpty();
+    // Assert — the GET handler ran for the HEAD too, and HEAD mirrors GET without a body
+    verify(orchestrator, times(2)).getStateSnapshot(EXISTING);
+    assertThat(head.statusCode()).isEqualTo(200).isEqualTo(get.statusCode());
+    assertThat(head.headers().firstValue("Content-Type"))
+        .isPresent()
+        .isEqualTo(get.headers().firstValue("Content-Type"));
+    assertThat(get.body()).isNotEmpty();
+    assertThat(head.body()).isEmpty();
   }
 
   @Test
-  void head_getRouteWithoutRequiredRole_returns403() throws Exception {
-    // Arrange — authenticated, but without the READ role the GET route requires
+  void head_missingSaga_returns404LikeGet() throws Exception {
+    // Arrange
+    provider.granted = EnumSet.of(SagaRole.READ);
+
+    // Act
+    HttpResponse<String> head = send("HEAD", "/sagas/" + MISSING);
+    HttpResponse<String> get = send("GET", "/sagas/" + MISSING);
+
+    // Assert — HEAD does not report a saga that does not exist
+    assertThat(head.statusCode()).isEqualTo(404).isEqualTo(get.statusCode());
+    assertThat(head.body()).isEmpty();
+  }
+
+  @Test
+  void head_getRouteWithoutRequiredRole_returns403WithoutRunningHandler() throws Exception {
+    // Arrange — authenticated, but without the READ role the route requires
     provider.granted = EnumSet.noneOf(SagaRole.class);
 
     // Act
-    HttpResponse<String> response = send("HEAD", "/sagas/saga-1");
+    HttpResponse<String> response = send("HEAD", "/sagas/" + EXISTING);
 
     // Assert — HEAD is authorized against the GET route's operation, not let through
     assertThat(response.statusCode()).isEqualTo(403);
+    verify(orchestrator, never()).getStateSnapshot(EXISTING);
   }
 
   @Test

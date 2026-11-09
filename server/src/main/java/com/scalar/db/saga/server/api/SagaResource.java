@@ -168,7 +168,8 @@ public final class SagaResource {
         },
         SagaOperation.START_SAGA);
 
-    routes.get(
+    ReadRoutes.register(
+        routes,
         "/sagas/{id}",
         ctx -> respond(ctx, 200, orchestrator.getStateSnapshot(ctx.pathParam("id"))),
         SagaOperation.GET_SAGA);
@@ -176,7 +177,8 @@ public final class SagaResource {
     // A saga's detail (state + timeline). An application read of its own saga — self-service
     // diagnosis of a failure — so it lives here with the other application reads, not on the admin
     // surface; the timeline redacts raw step payloads.
-    routes.get(
+    ReadRoutes.register(
+        routes,
         "/sagas/{id}/detail",
         ctx ->
             ctx.status(200)

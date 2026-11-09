@@ -40,11 +40,11 @@ import java.util.Objects;
  *       com.scalar.db.saga.server.api.RateLimitHandler}.
  * </ul>
  *
- * <p>A {@code HEAD} needs no case of its own. Javalin answers a {@code HEAD} to a route that
- * registers only {@code GET} with that route's handler and strips the body, and it gives the
- * request the {@code GET} route's roles, so the {@code HEAD} is authenticated and authorized
- * exactly like the {@code GET} it mirrors. A {@code HEAD} to an untagged route therefore meets the
- * same fail-closed rejection as its {@code GET}.
+ * <p>A {@code HEAD} needs no case of its own. Every read route registers its handler on {@code
+ * HEAD} as well as {@code GET}, with the same operation, so a {@code HEAD} is authenticated and
+ * authorized exactly like the {@code GET} it mirrors. A {@code HEAD} that has no handler of its own
+ * still carries the {@code GET} route's roles, so it meets the same checks, and on an untagged
+ * route the same fail-closed rejection.
  *
  * <p>The {@link SagaAuthenticationException}/{@link SagaAuthorizationException} thrown here are
  * mapped to {@code 401}/{@code 403} by {@code ErrorMapper}, keeping response rendering in one

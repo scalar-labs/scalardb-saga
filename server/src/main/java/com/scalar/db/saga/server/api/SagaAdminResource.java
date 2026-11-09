@@ -63,7 +63,7 @@ public final class SagaAdminResource {
       JavalinDefaultRoutingApi routes,
       DefaultSagaOrchestrator orchestrator,
       long driveDeadlineMillis) {
-    routes.get("/sagas", ctx -> list(ctx, orchestrator), SagaOperation.LIST_SAGAS);
+    ReadRoutes.register(routes, "/sagas", ctx -> list(ctx, orchestrator), SagaOperation.LIST_SAGAS);
     routes.post(
         "/sagas/{id}/recover",
         ctx -> recover(ctx, orchestrator, driveDeadlineMillis),

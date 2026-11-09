@@ -20,13 +20,13 @@ public final class HealthResource {
   /**
    * Registers the liveness route on the given routing configuration, tagged {@link
    * SagaOperation#HEALTH} so the security layer exempts this infrastructure probe — which carries
-   * no user credential — from caller-facing auth. Javalin answers {@code HEAD} from the {@code GET}
-   * handler with the same roles, so load balancers and uptime monitors that probe with {@code HEAD}
-   * are exempted the same way.
+   * no user credential — from caller-facing auth. It answers {@code HEAD} as well as {@code GET},
+   * since load balancers and uptime monitors commonly probe with {@code HEAD}.
    *
    * @param routes the routing configuration the server is created with
    */
   public static void register(JavalinDefaultRoutingApi routes) {
-    routes.get(PATH, ctx -> ctx.json(Map.of("status", "UP")), SagaOperation.HEALTH);
+    ReadRoutes.register(
+        routes, PATH, ctx -> ctx.json(Map.of("status", "UP")), SagaOperation.HEALTH);
   }
 }
