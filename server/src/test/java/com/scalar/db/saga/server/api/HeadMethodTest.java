@@ -17,6 +17,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.util.EnumSet;
+import java.util.Set;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -24,17 +25,15 @@ import org.junit.jupiter.api.Test;
 /**
  * Pins HEAD handling across the real REST routes, end-to-end against a live Javalin dispatch.
  *
- * <p>Regression guard: enforcing security on {@code beforeMatched} (rather than the previous
- * verb-keyed {@code before} handler that mapped HEAD to the GET policy) means a HEAD to a GET-only
- * route lands in Javalin's resource-handler branch with no roles, which without care rendered a
- * misleading {@code 500}. This locks in the intended behavior — {@code /health} serves HEAD ({@code
- * 200}) for infrastructure probes; every other GET route answers HEAD with an honest {@code 405
- * Allow: GET} — which {@code TransportPolicyParityTest} cannot catch, since it inspects registered
- * endpoint metadata rather than runtime per-method dispatch.
+ * <p>Javalin answers a HEAD to a GET route from the GET handler and gives it the GET route's roles,
+ * so a HEAD is served, authenticated and authorized exactly like its GET. This locks that in at
+ * runtime, which {@code TransportPolicyParityTest} cannot, since it inspects registered endpoint
+ * metadata rather than per-method dispatch.
  */
 class HeadMethodTest {
 
   private final HttpClient http = HttpClient.newHttpClient();
+  private final GrantingProvider provider = new GrantingProvider();
   private Javalin app;
 
   @BeforeEach
@@ -42,7 +41,7 @@ class HeadMethodTest {
     app =
         Javalin.create(
             cfg -> {
-              SagaSecurityHandler.register(cfg.routes, new FullAccessProvider());
+              SagaSecurityHandler.register(cfg.routes, provider);
               ErrorMapper.register(cfg.routes);
               HealthResource.register(cfg.routes);
               SagaResource.register(
@@ -51,8 +50,8 @@ class HeadMethodTest {
                   0L,
                   new java.util.concurrent.CompletableFuture<>(),
                   new SagaWaiterRegistry());
-              // A route registered with no operation, to prove the HEAD branch did not weaken the
-              // fail-closed rejection of an untagged route on its normal (GET) path.
+              // A route registered with no operation, to prove HEAD meets the same fail-closed
+              // rejection of an untagged route as GET does.
               cfg.routes.get("/untagged", ctx -> ctx.result("should never be served"));
             });
     // Loopback, not the wildcard: a wildcard bind can share a port with another suite's
@@ -69,30 +68,57 @@ class HeadMethodTest {
 
   @Test
   void head_healthProbe_returns200() throws Exception {
+    // Arrange — a probe carries no credential that grants any role
+    provider.granted = EnumSet.noneOf(SagaRole.class);
+
     // Act — a load balancer or uptime monitor probing liveness with HEAD
     HttpResponse<String> response = send("HEAD", "/health");
 
-    // Assert — served like GET, with the body stripped for HEAD
+    // Assert — served like GET, exempt from auth, with the body stripped for HEAD
     assertThat(response.statusCode()).isEqualTo(200);
     assertThat(response.body()).isEmpty();
   }
 
   @Test
-  void head_getOnlyRoute_returns405WithAllowGet() throws Exception {
+  void head_getRouteWithRequiredRole_isServedLikeGet() throws Exception {
+    // Arrange
+    provider.granted = EnumSet.of(SagaRole.READ);
+
     // Act — HEAD on a route that only registers GET
     HttpResponse<String> response = send("HEAD", "/sagas/saga-1");
 
-    // Assert — an honest 405 with Allow: GET, not a misleading 500
-    assertThat(response.statusCode()).isEqualTo(405);
-    assertThat(response.headers().firstValue("Allow")).hasValue("GET");
+    // Assert — the GET handler answers, with the body stripped for HEAD
+    assertThat(response.statusCode()).isEqualTo(200);
+    assertThat(response.body()).isEmpty();
   }
 
   @Test
-  void get_untaggedRoute_stillReturns500() throws Exception {
-    // Act — the HEAD branch only diverts HEAD; a GET to an untagged route must still fail closed
+  void head_getRouteWithoutRequiredRole_returns403() throws Exception {
+    // Arrange — authenticated, but without the READ role the GET route requires
+    provider.granted = EnumSet.noneOf(SagaRole.class);
+
+    // Act
+    HttpResponse<String> response = send("HEAD", "/sagas/saga-1");
+
+    // Assert — HEAD is authorized against the GET route's operation, not let through
+    assertThat(response.statusCode()).isEqualTo(403);
+  }
+
+  @Test
+  void head_untaggedRoute_returns500() throws Exception {
+    // Act
+    HttpResponse<String> response = send("HEAD", "/untagged");
+
+    // Assert — an untagged route is a server-side bug, so HEAD fails closed like GET
+    assertThat(response.statusCode()).isEqualTo(500);
+  }
+
+  @Test
+  void get_untaggedRoute_returns500() throws Exception {
+    // Act
     HttpResponse<String> response = send("GET", "/untagged");
 
-    // Assert — fail-closed rejection unchanged (an untagged route is a server-side bug, so 500)
+    // Assert — fail-closed rejection (an untagged route is a server-side bug, so 500)
     assertThat(response.statusCode()).isEqualTo(500);
     assertThat(response.body()).doesNotContain("should never be served");
   }
@@ -105,16 +131,18 @@ class HeadMethodTest {
         BodyHandlers.ofString());
   }
 
-  /** A provider that grants full access; the tested paths short-circuit before it is consulted. */
-  private static final class FullAccessProvider implements SagaSecurityProvider {
+  /** A provider that authenticates every caller with the roles the test sets. */
+  private static final class GrantingProvider implements SagaSecurityProvider {
+    private volatile Set<SagaRole> granted = EnumSet.allOf(SagaRole.class);
+
     @Override
     public SagaIdentity authenticate(SagaAuthRequest request) {
-      return SagaIdentity.of("test", EnumSet.allOf(SagaRole.class));
+      return SagaIdentity.of("test", granted);
     }
 
     @Override
     public String name() {
-      return "test-full-access";
+      return "test-granting";
     }
   }
 }

@@ -1,9 +1,6 @@
 package com.scalar.db.saga.server.security;
 
 import io.javalin.http.Context;
-import io.javalin.http.HandlerType;
-import io.javalin.http.Header;
-import io.javalin.http.HttpStatus;
 import io.javalin.router.JavalinDefaultRoutingApi;
 import java.util.Objects;
 
@@ -43,22 +40,15 @@ import java.util.Objects;
  *       com.scalar.db.saga.server.api.RateLimitHandler}.
  * </ul>
  *
- * <p>A {@code HEAD} to a route that only registers {@code GET} is answered here with {@code 405
- * Method Not Allowed} ({@code Allow: GET}). Javalin has no HEAD-as-GET toggle, so it routes such a
- * request through {@code beforeMatched} with the empty resource-handler role set — the same signal
- * an untagged route gives. The two are told apart by the verb: an empty role set on {@code HEAD}
- * means "GET route exists, no HEAD handler" ({@code beforeMatched} runs for HEAD only when a GET
- * handler is registered at the path), so it is a method mismatch, not a missing policy; an empty
- * set on any other verb is still a programming error and falls through to {@link
- * SagaOperation#fromRouteRoles}'s fail-closed rejection. A route that wants to serve HEAD (the
- * liveness probe) registers its own {@code HEAD} handler, which carries the route's roles and so
- * never reaches this branch.
+ * <p>A {@code HEAD} needs no case of its own. Javalin answers a {@code HEAD} to a route that
+ * registers only {@code GET} with that route's handler and strips the body, and it gives the
+ * request the {@code GET} route's roles, so the {@code HEAD} is authenticated and authorized
+ * exactly like the {@code GET} it mirrors. A {@code HEAD} to an untagged route therefore meets the
+ * same fail-closed rejection as its {@code GET}.
  *
  * <p>The {@link SagaAuthenticationException}/{@link SagaAuthorizationException} thrown here are
  * mapped to {@code 401}/{@code 403} by {@code ErrorMapper}, keeping response rendering in one
- * place. The {@code 405} above is the one response rendered inline rather than through {@code
- * ErrorMapper}: it is a method-dispatch decision made at this chokepoint, not an exception
- * surfacing from business logic, and a HEAD response carries no body to render anyway.
+ * place.
  */
 public final class SagaSecurityHandler {
 
@@ -85,15 +75,6 @@ public final class SagaSecurityHandler {
   }
 
   private void handle(Context ctx) {
-    if (HandlerType.HEAD.equals(ctx.method()) && ctx.routeRoles().isEmpty()) {
-      // HEAD to a GET-only route: Javalin routes it here with the empty resource-handler role set.
-      // The route exists (beforeMatched runs for HEAD only when a GET handler is registered at the
-      // path), we just do not serve HEAD on it — answer 405 rather than letting fromRouteRoles
-      // reject it as an untagged route (500).
-      ctx.status(HttpStatus.METHOD_NOT_ALLOWED).header(Header.ALLOW, "GET");
-      ctx.skipRemainingHandlers();
-      return;
-    }
     SagaOperation operation = SagaOperation.fromRouteRoles(ctx.routeRoles());
     SagaRole required = operation.requiredRole();
     if (required == null) {
