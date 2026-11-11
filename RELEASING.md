@@ -352,10 +352,13 @@ delete.
 ### Rehearsing the pipeline
 
 `publish-maven`, `publish-image` and `github-release` run only on a release tag, so no pull request
-exercises them: the Central credentials, the emulated arm64 build, the keyless signature and the
-release creation are tested by the next release and by nothing before it. After a change to any of
-them, or to the secrets or the signing key they use, rehearse before tagging, because a release
-cannot be taken back.
+exercises them. Much of what they do is exercised anyway:
+[release-snapshot.yml](.github/workflows/release-snapshot.yml) runs on every push to `main` and
+each version branch with the same Central credentials and GPG key, and builds the `linux/arm64`
+image through the same `push-server-image` action. What only a tag exercises is the Portal
+deployment, the image's keyless signature and attestations, and the release creation, and the next
+release is the first to test them. After a change to any of these jobs, or to the secrets or the
+signing key they use, rehearse before tagging, because a release cannot be taken back.
 
 A pre-release version is not a substitute. It lowers the stakes — nothing depends on it, and the
 suffix keeps it from taking the *Latest* badge — but a released Central version is immutable
@@ -396,9 +399,9 @@ under QEMU and the registry push. It does not cover the Portal deployment, cosig
 release.
 
 **The full path.** Secrets in place, and the pre-release tag above. This is the only rung that
-exercises the Portal deployment, the `linux/arm64` build under QEMU, the signature and the release
-creation. **Do not release the deployment at the Portal** — dropping it is what keeps the rehearsal
-reversible, and a released version is immutable.
+exercises the Portal deployment, the signature and attestations, and the release creation. **Do
+not release the deployment at the Portal** — dropping it is what keeps the rehearsal reversible, and
+a released version is immutable.
 
 Clean up afterwards:
 
