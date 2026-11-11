@@ -33,8 +33,7 @@ jobs:
   # Each job below carries a timeout because the concurrency group above never cancels, so a hung run
   # would otherwise hold it for GitHub's default six hours. The bounds are deliberately several times
   # any plausible healthy runtime: a timeout that fires partway through leaves a half-published
-  # release, which is worse than the stall it prevents. Tighten them once real timings exist; none of
-  # these jobs has ever run.
+  # release, which is worse than the stall it prevents.
   verify-version:
     runs-on: ubuntu-latest
     timeout-minutes: 10
