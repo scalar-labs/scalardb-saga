@@ -20,7 +20,12 @@
 #
 # Ubuntu resolute (26.04) underneath because it is the current Ubuntu LTS. Like the JRE major, moving
 # to the next one is a deliberate manual change.
-FROM eclipse-temurin:25.0.5_8-jre-resolute@sha256:b6e00330337143a2c1a20f1c1c693d4b6ce9a3c30ade8b9d03fc68cc9e3871e7
+#
+# Scalar managed base image:
+# - https://github.com/orgs/scalar-labs/packages/container/package/jre25
+# You can confirm the digest with:
+#   docker buildx imagetools inspect ghcr.io/scalar-labs/jre25:<TAG>
+FROM ghcr.io/scalar-labs/jre25:25.0.5_8.202611200209@sha256:2f153434ef83a32558f62d2dda9bbbdebd8426c774881d5e26c6b5f3896459ab
 
 # Two things in one layer, since each `RUN` is a layer and neither is worth its own:
 #
@@ -37,12 +42,7 @@ FROM eclipse-temurin:25.0.5_8-jre-resolute@sha256:b6e00330337143a2c1a20f1c1c693d
 #    logs in as the daemon user, so a real shell would serve only an attacker who reaches it.
 #
 # hadolint ignore=DL3005
-RUN export DEBIAN_FRONTEND=noninteractive \
- && apt-get update \
- && apt-get upgrade -y --no-install-recommends \
- && apt-get autoremove -y \
- && rm -rf /var/lib/apt/lists/* \
- && groupadd --system --gid 201 scalardb \
+RUN groupadd --system --gid 201 scalardb \
  && useradd --system --uid 201 --gid 201 --no-create-home --shell /usr/sbin/nologin scalardb
 
 WORKDIR /scalardb-saga
