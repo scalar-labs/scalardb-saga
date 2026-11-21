@@ -1,0 +1,5 @@
+kind: enhancement
+body: Add a local designer, `scalardb-saga-designer`, that edits, validates and exports the declarative saga definitions in a folder.
+time: 2026-11-21T19:08:47.398951+09:00
+custom:
+    PR: "255"
