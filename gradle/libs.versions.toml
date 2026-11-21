@@ -22,6 +22,7 @@ jcip = "1.0-1"
 javalin = "7.2.3"
 nimbus-jose-jwt = "10.9.1"
 picocli = "4.7.7"
+playwright = "1.65.1"
 grpc = "1.85.1"
 protobuf-java = "4.35.1"
 protobuf-plugin = "0.10.0"
@@ -65,6 +66,7 @@ jcip-annotations = { module = "com.github.stephenc.jcip:jcip-annotations", versi
 javalin = { module = "io.javalin:javalin", version.ref = "javalin" }
 nimbus-jose-jwt = { module = "com.nimbusds:nimbus-jose-jwt", version.ref = "nimbus-jose-jwt" }
 picocli = { module = "info.picocli:picocli", version.ref = "picocli" }
+playwright = { module = "com.microsoft.playwright:playwright", version.ref = "playwright" }
 grpc-bom = { module = "io.grpc:grpc-bom", version.ref = "grpc" }
 grpc-protobuf = { module = "io.grpc:grpc-protobuf" }
 grpc-stub = { module = "io.grpc:grpc-stub" }
