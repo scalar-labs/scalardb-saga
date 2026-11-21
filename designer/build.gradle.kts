@@ -23,6 +23,22 @@ tasks.named<JavaExec>("run") {
     workingDir = rootDir
 }
 
+// The UI's own files get only the basics: Spotless's JavaScript and CSS formatters need Node, which
+// the build does not use. Vendored libraries stay exactly as published.
+spotless {
+    format("designerUi") {
+        target(
+            "src/main/resources/designer-ui/**/*.js",
+            "src/main/resources/designer-ui/**/*.css",
+            "src/main/resources/designer-ui/**/*.html",
+        )
+        targetExclude("src/main/resources/designer-ui/vendor/**")
+        trimTrailingWhitespace()
+        endWithNewline()
+        leadingTabsToSpaces(2)
+    }
+}
+
 dependencies {
     implementation(project(":core"))
     implementation(platform(libs.jackson.bom))
@@ -46,4 +62,44 @@ tasks.named<Test>("test") {
     systemProperty("designer.fixtures.root", rootDir.absolutePath)
     // Lets the HTTP tests send a foreign Host header, as a DNS-rebinding page would.
     systemProperty("jdk.httpclient.allowRestrictedHeaders", "host")
+}
+
+// Browser tests of the UI, with Playwright for Java, so no Node is needed. Not part of `check`,
+// which stays browser-free: CI runs them in a job of their own (`./gradlew :designer:uiTest`).
+testing {
+    suites {
+        register<JvmTestSuite>("uiTest") {
+            useJUnitJupiter(libs.versions.junit.jupiter.get())
+            dependencies {
+                implementation(project())
+                implementation(libs.playwright)
+                implementation(libs.assertj.core)
+                implementation(platform(libs.jackson.bom))
+                implementation(libs.jackson.databind)
+            }
+        }
+    }
+}
+
+// Playwright's browser builds go under the repository's own Gradle folder, which git ignores,
+// rather than the user's cache directory. Only Chromium's headless shell is installed: the tests
+// drive nothing else, and never a headed browser.
+val playwrightBrowsers = rootProject.layout.projectDirectory.dir(".gradle/ms-playwright").asFile.absolutePath
+val playwrightWithDeps = providers.gradleProperty("playwrightWithDeps").isPresent
+
+val installPlaywrightBrowser by tasks.registering(JavaExec::class) {
+    description = "Downloads the Chromium build the UI tests drive. -PplaywrightWithDeps also " +
+        "installs its system libraries, which CI's Linux runners need."
+    classpath = sourceSets["uiTest"].runtimeClasspath
+    mainClass = "com.microsoft.playwright.CLI"
+    args(listOfNotNull("install", "--only-shell", if (playwrightWithDeps) "--with-deps" else null, "chromium"))
+    environment("PLAYWRIGHT_BROWSERS_PATH", playwrightBrowsers)
+}
+
+tasks.named<Test>("uiTest") {
+    dependsOn(installPlaywrightBrowser)
+    environment("PLAYWRIGHT_BROWSERS_PATH", playwrightBrowsers)
+    // Without this, Playwright would download every browser it supports on first use.
+    environment("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1")
+    systemProperty("designer.fixtures.root", rootDir.absolutePath)
 }

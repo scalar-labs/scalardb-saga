@@ -70,7 +70,7 @@ jobs:
       # with the build cache on, and a cached compile task replays no javac output. Error Prone and
       # NullAway ran over them for months with nobody able to see what they printed.
       - name: Check compiler warnings
-        run: ./gradlew clean compileTestJava compileTestFixturesJava compileIntegrationTestJava --no-build-cache
+        run: ./gradlew clean compileTestJava compileTestFixturesJava compileIntegrationTestJava compileUiTestJava --no-build-cache
 
       # Keep the failing run's reports and result XML so a flake that doesn't reproduce is still
       # diagnosable. The warnings step's `clean` wipes build/, so a failure there has nothing to
@@ -83,6 +83,46 @@ jobs:
           path: |
             **/build/reports/tests/**
             **/build/test-results/**
+          if-no-files-found: ignore
+
+  # Browser tests of the designer's UI, kept out of `check` so that it stays browser-free. The
+  # Chromium build Playwright drives is cached; its system libraries are installed on every run.
+  designer-ui-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Java 25
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: 25
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+
+      # The Playwright version lives in the version catalog, so a bump there downloads a new build.
+      - name: Cache the Playwright browser
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .gradle/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
+
+      - name: Install the browser and its system libraries
+        run: ./gradlew :designer:installPlaywrightBrowser -PplaywrightWithDeps
+
+      - name: UI tests
+        run: ./gradlew :designer:uiTest
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: designer-ui-test-reports
+          path: |
+            designer/build/reports/tests/uiTest/**
+            designer/build/test-results/uiTest/**
           if-no-files-found: ignore
 
   dockerfile-lint:

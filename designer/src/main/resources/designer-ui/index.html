@@ -4,9 +4,19 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Saga Designer</title>
+    <link rel="stylesheet" href="./styles.css">
+    <script type="importmap">
+      {
+        "imports": {
+          "preact": "./vendor/preact-10.29.8/preact.module.js",
+          "preact/hooks": "./vendor/preact-10.29.8/hooks.module.js",
+          "htm": "./vendor/htm-3.1.1/htm.module.js"
+        }
+      }
+    </script>
+    <script type="module" src="./app.js"></script>
   </head>
   <body>
-    <h1>Saga Designer</h1>
-    <p>The editor is not built yet. The designer's API is running at <code>/api/workspace</code>.</p>
+    <div id="app"><p class="loading">Loading the designer…</p></div>
   </body>
 </html>
