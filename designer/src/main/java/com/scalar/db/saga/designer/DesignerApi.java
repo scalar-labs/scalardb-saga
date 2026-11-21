@@ -100,6 +100,9 @@ final class DesignerApi {
     } catch (BadRequestException e) {
       ((ArrayNode) result.get("warnings"))
           .add("The designer's saved samples for this file are not shown: " + e.reason());
+    } catch (IOException e) {
+      ((ArrayNode) result.get("warnings"))
+          .add("The designer's saved samples for this file could not be read: " + e.getMessage());
     }
     return result;
   }
@@ -136,7 +139,7 @@ final class DesignerApi {
     boolean sameVersion = false;
     JsonNode file = request.get("file");
     if (file != null && file.isTextual()) {
-      JsonNode current = currentTree(file.asText());
+      JsonNode current = normalized(currentTree(file.asText()));
       sameVersion =
           current != null
               && !DefinitionFormats.identical(current, analysis.definition())
@@ -151,11 +154,16 @@ final class DesignerApi {
    * {@code PUT /api/files/{file}} with {@code {model, designerData, baseSha256}}. Writes the
    * definition only if it has no problems, and not at all if it is unchanged; writes the designer
    * data whenever the definition file exists. Response: {@code {definitionWritten, unchanged,
-   * designerDataWritten, designerDataError, sha256, problems}}.
+   * designerDataWritten, designerDataError, designerDataDeferred, sha256, problems}}, where {@code
+   * designerDataDeferred} names the steps whose samples wait for the definition to be saved, since
+   * the file does not have those steps yet.
+   *
+   * <p>Saves run one at a time, so that two editor tabs saving the same file at once cannot both
+   * pass the SHA check: the second one sees the first one's write and gets a conflict.
    *
    * @throws Workspace.ConflictException if the file changed since {@code baseSha256} was read
    */
-  ObjectNode save(String fileName, JsonNode request) throws IOException {
+  synchronized ObjectNode save(String fileName, JsonNode request) throws IOException {
     JsonNode model = required(request, "model");
     FileContent current = workspace.readDefinition(fileName);
     Format format = Format.ofFileName(fileName);
@@ -167,8 +175,10 @@ final class DesignerApi {
     Workspace.requireUnchanged(current, baseSha256);
     Analysis analysis = analyze(model);
     JsonNode currentTree = current == null ? null : parseOrNull(current.text(), format);
+    JsonNode normalizedTree = normalized(currentTree);
     boolean unchanged =
-        currentTree != null && DefinitionFormats.identical(currentTree, analysis.definition());
+        normalizedTree != null
+            && DefinitionFormats.identical(normalizedTree, analysis.definition());
 
     ObjectNode result = object();
     boolean written = false;
@@ -182,28 +192,67 @@ final class DesignerApi {
     result.put("definitionWritten", written);
     result.put("unchanged", unchanged);
 
+    // From here on the definition is saved, so nothing may fail the request: a problem with the
+    // designer data is reported next to the new sha256, which the client needs for its next save.
     boolean dataWritten = false;
+    ArrayNode deferred = DefinitionFormats.json().createArrayNode();
     JsonNode data = request.get("designerData");
+    result.putNull("designerDataError");
     if (sha256 != null && data != null && data.isObject()) {
-      FileContent existing = workspace.readDesignerData(fileName);
       try {
-        String text =
-            DesignerData.write(data, model, format, existing == null ? null : existing.text());
-        if (existing == null || !existing.text().equals(text)) {
-          workspace.writeDesignerData(fileName, text);
+        FileContent existing = workspace.readDesignerData(fileName);
+        // When the model did not reach the file, the samples stay keyed to the names on disk.
+        List<String> savedNames = written || unchanged ? null : stepNames(currentTree);
+        DesignerData.Written out =
+            DesignerData.write(
+                data, model, format, existing == null ? null : existing.text(), savedNames);
+        out.deferred().forEach(deferred::add);
+        if (existing == null || !existing.text().equals(out.text())) {
+          workspace.writeDesignerData(fileName, out.text());
           dataWritten = true;
         }
-        result.putNull("designerDataError");
       } catch (BadRequestException e) {
         result.put("designerDataError", e.reason());
+      } catch (IOException e) {
+        result.put("designerDataError", "The designer data could not be saved: " + e.getMessage());
       }
-    } else {
-      result.putNull("designerDataError");
     }
     result.put("designerDataWritten", dataWritten);
+    result.set("designerDataDeferred", deferred);
     result.put("sha256", sha256);
     result.set("problems", problems(analysis.problems()));
     return result;
+  }
+
+  /** The step names a definition file holds, in order; none if it cannot be read. */
+  private static List<String> stepNames(@Nullable JsonNode definition) {
+    List<String> names = new ArrayList<>();
+    if (definition != null) {
+      for (JsonNode step : definition.path("steps")) {
+        JsonNode name = step.get("name");
+        if (name != null && name.isTextual()) {
+          names.add(name.asText());
+        }
+      }
+    }
+    return names;
+  }
+
+  /**
+   * A file's tree as the editor would export it, for comparing with the model's export. The editor
+   * writes known fields in a fixed order, so a file that lists {@code version} before {@code name}
+   * must not count as changed; the order of body fields and query rows, and the scale of decimals,
+   * still count, since the editor keeps them.
+   */
+  private static @Nullable JsonNode normalized(@Nullable JsonNode tree) {
+    if (tree == null || !tree.isObject()) {
+      return tree;
+    }
+    try {
+      return EditorModel.toDefinition(EditorModel.fromDefinition(tree)).definition();
+    } catch (BadRequestException e) {
+      return tree; // a model the editor cannot export back: compare the file as it is
+    }
   }
 
   /** An export download: the file name to offer and its content. */

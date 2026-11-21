@@ -4,8 +4,11 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.scalar.db.saga.designer.DefinitionFormats.Format;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.jspecify.annotations.Nullable;
@@ -67,8 +70,11 @@ final class DesignerData {
     return data;
   }
 
+  /** The file text to write, and the steps whose samples have to wait for a definition save. */
+  record Written(String text, List<String> deferred) {}
+
   /**
-   * The file text for the UI's data.
+   * The file text for the UI's data, when the model is what the definition file holds.
    *
    * @param existing the file as it is now, or {@code null}; a file written by a newer designer is
    *     never overwritten, since this version would drop what it does not know
@@ -76,38 +82,96 @@ final class DesignerData {
    *     name, or if the existing file is from a newer designer
    */
   static String write(JsonNode data, JsonNode model, Format format, @Nullable String existing) {
+    return write(data, model, format, existing, null).text();
+  }
+
+  /**
+   * The file text for the UI's data.
+   *
+   * <p>When the definition was not saved, as when it has problems, the file on disk still names its
+   * steps the old way, and the samples have to stay keyed to those names or the next open drops
+   * them. {@code savedNames} then lists the step names on disk:
+   *
+   * <ul>
+   *   <li>a model step with a saved name gets the model's samples;
+   *   <li>a saved name no model step has any more, such as the old name of a renamed step, keeps
+   *       its samples from {@code existing};
+   *   <li>a model step whose name is not saved yet is listed in {@link Written#deferred}, and its
+   *       samples stay in the editor until the definition can be saved.
+   * </ul>
+   *
+   * @param savedNames the step names in the definition file on disk if the model was not saved
+   *     there, or {@code null} if the file holds exactly the model
+   * @throws BadRequestException as {@link #write(JsonNode, JsonNode, Format, String)} does
+   */
+  static Written write(
+      JsonNode data,
+      JsonNode model,
+      Format format,
+      @Nullable String existing,
+      @Nullable List<String> savedNames) {
+    JsonNode existingFile = null;
     if (existing != null) {
       try {
-        checkFormatVersion(DefinitionFormats.read(existing, format));
+        existingFile = DefinitionFormats.read(existing, format);
+        checkFormatVersion(existingFile);
       } catch (JsonProcessingException e) {
         // A damaged file is replaced: what it held cannot be read either way.
       }
     }
-    ObjectNode file = DefinitionFormats.json().createObjectNode();
-    file.put("formatVersion", FORMAT_VERSION);
-    copyText(data, file, "sampleInput");
-    ObjectNode steps = file.putObject("steps");
-    Set<String> names = new HashSet<>();
-    // In definition order, so the file reads in the same order as the definition.
+    // The model's samples by step name, in definition order.
+    Map<String, ObjectNode> fromModel = new LinkedHashMap<>();
     for (JsonNode step : model.path("steps")) {
       if (step.has("raw")) {
         continue; // not an object, so it has no name and the UI keeps no samples for it
       }
       String name = step.path("name").asText("");
-      if (name.isBlank() || !names.add(name)) {
+      if (name.isBlank() || fromModel.containsKey(name)) {
         throw new BadRequestException(
             "Sample data is saved by step name, so every step needs a unique name");
       }
+      ObjectNode out = DefinitionFormats.json().createObjectNode();
       JsonNode stepData = data.path("steps").get(step.path("id").asText());
       if (stepData != null && stepData.isObject()) {
-        ObjectNode out = steps.objectNode();
         copyText(stepData, out, "sampleResponse");
-        if (!out.isEmpty()) {
-          steps.set(name, out);
+      }
+      fromModel.put(name, out);
+    }
+
+    ObjectNode file = DefinitionFormats.json().createObjectNode();
+    file.put("formatVersion", FORMAT_VERSION);
+    copyText(data, file, "sampleInput");
+    ObjectNode steps = file.putObject("steps");
+    List<String> deferred = new ArrayList<>();
+    if (savedNames == null) {
+      fromModel.forEach(
+          (name, out) -> {
+            if (!out.isEmpty()) {
+              steps.set(name, out);
+            }
+          });
+    } else {
+      for (String name : savedNames) {
+        ObjectNode out = fromModel.get(name);
+        JsonNode kept = existingFile == null ? null : existingFile.path("steps").get(name);
+        if (out != null) {
+          if (!out.isEmpty()) {
+            steps.set(name, out);
+          }
+        } else if (kept != null && kept.isObject()) {
+          ObjectNode copy = steps.putObject(name);
+          copyText(kept, copy, "sampleResponse");
         }
       }
+      Set<String> saved = new HashSet<>(savedNames);
+      fromModel.forEach(
+          (name, out) -> {
+            if (!saved.contains(name) && !out.isEmpty()) {
+              deferred.add(name);
+            }
+          });
     }
-    return DefinitionFormats.write(file, format);
+    return new Written(DefinitionFormats.write(file, format), List.copyOf(deferred));
   }
 
   private static void checkFormatVersion(JsonNode file) {

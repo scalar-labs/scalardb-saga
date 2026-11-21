@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.scalar.db.saga.designer.DefinitionFormats.Format;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class DesignerDataTest {
@@ -171,5 +172,33 @@ class DesignerDataTest {
   void empty_always_hasANullInputAndNoSteps() {
     // Act Assert
     assertThat(DesignerData.empty().toString()).isEqualTo("{\"sampleInput\":null,\"steps\":{}}");
+  }
+
+  @Test
+  void write_withSavedNames_keepsUnsavedRenamesKeyedToTheNamesOnDisk() throws Exception {
+    // Arrange
+    JsonNode model =
+        model(
+            "{\"name\": \"n\", \"steps\": [{\"name\": \"pay\"}, {\"name\": \"ship\"},"
+                + " {\"name\": \"new\"}]}");
+    ObjectNode data =
+        uiData(
+            "{\"steps\": {\"s1\": {\"sampleResponse\": \"P\"}, \"s2\": {\"sampleResponse\":"
+                + " \"S\"}, \"s3\": {\"sampleResponse\": \"N\"}}}");
+    String existing =
+        "{\"formatVersion\": 1, \"steps\": {\"charge\": {\"sampleResponse\": \"C\"},"
+            + " \"ship\": {\"sampleResponse\": \"old\"}}}";
+
+    // Act
+    DesignerData.Written written =
+        DesignerData.write(data, model, Format.JSON, existing, List.of("charge", "ship"));
+
+    // Assert
+    JsonNode steps = DefinitionFormats.read(written.text(), Format.JSON).get("steps");
+    assertThat(steps.get("charge").get("sampleResponse").asText()).isEqualTo("C");
+    assertThat(steps.get("ship").get("sampleResponse").asText()).isEqualTo("S");
+    assertThat(steps.has("pay")).isFalse();
+    assertThat(steps.has("new")).isFalse();
+    assertThat(written.deferred()).containsExactly("pay", "new");
   }
 }

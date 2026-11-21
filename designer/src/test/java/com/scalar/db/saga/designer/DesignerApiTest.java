@@ -14,6 +14,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import org.junit.jupiter.api.BeforeEach;
@@ -183,6 +187,20 @@ class DesignerApiTest {
     // Assert
     assertThat(result.get("model").get("name").asText()).isEqualTo("order");
     assertThat(result.get("designerData")).isEqualTo(DesignerData.empty());
+    assertThat(result.get("warnings")).hasSize(1);
+  }
+
+  @Test
+  void open_designerFolderThatIsAFile_opensTheDefinitionWithAWarning() throws Exception {
+    // Arrange
+    Files.writeString(dir.resolve("a.json"), VALID);
+    Files.writeString(dir.resolve(".designer"), "");
+
+    // Act
+    ObjectNode result = api.open("a.json");
+
+    // Assert
+    assertThat(result.get("model").get("name").asText()).isEqualTo("order");
     assertThat(result.get("warnings")).hasSize(1);
   }
 
@@ -480,6 +498,118 @@ class DesignerApiTest {
     // Act Assert
     assertThatThrownBy(() -> api.save("notes.txt", request))
         .isInstanceOf(BadRequestException.class);
+  }
+
+  @Test
+  void save_twoTabsSavingAtOnce_letsOnlyOneWriteAndGivesTheOtherAConflict() throws Exception {
+    for (int round = 0; round < 20; round++) {
+      // Arrange
+      Files.writeString(dir.resolve("a.json"), VALID);
+      String base = Workspace.sha256(VALID);
+      ObjectNode first = EditorModel.fromDefinition(json(VALID));
+      first.put("version", "2");
+      ObjectNode second = EditorModel.fromDefinition(json(VALID));
+      second.put("version", "3");
+      CountDownLatch start = new CountDownLatch(1);
+      ExecutorService executor = Executors.newFixedThreadPool(2);
+      try {
+        List<Future<Boolean>> results = new ArrayList<>();
+        for (ObjectNode model : List.of(first, second)) {
+          results.add(
+              executor.submit(
+                  () -> {
+                    start.await();
+                    try {
+                      api.save("a.json", saveRequest(model, DesignerData.empty(), base));
+                      return true;
+                    } catch (Workspace.ConflictException e) {
+                      return false;
+                    }
+                  }));
+        }
+
+        // Act
+        start.countDown();
+        int succeeded = 0;
+        for (Future<Boolean> result : results) {
+          succeeded += result.get() ? 1 : 0;
+        }
+
+        // Assert
+        assertThat(succeeded).isEqualTo(1);
+      } finally {
+        executor.shutdownNow();
+      }
+    }
+  }
+
+  @Test
+  void save_invalidModelRenamingAStep_keepsItsSamplesUnderTheSavedName() throws Exception {
+    // Arrange
+    Files.writeString(dir.resolve("a.json"), VALID);
+    Files.createDirectory(dir.resolve(".designer"));
+    Files.writeString(
+        dir.resolve(".designer/a.json"),
+        "{\"formatVersion\": 1, \"steps\": {\"charge\": {\"sampleResponse\": \"{}\"}}}");
+    ObjectNode model = EditorModel.fromDefinition(json(VALID));
+    ObjectNode step = (ObjectNode) model.get("steps").get(0);
+    step.put("name", "pay");
+    ((ObjectNode) step.get("phases")).remove("compensation");
+    ObjectNode data = json("{\"steps\": {\"s1\": {\"sampleResponse\": \"[]\"}}}");
+
+    // Act
+    ObjectNode result = api.save("a.json", saveRequest(model, data, Workspace.sha256(VALID)));
+    ObjectNode reopened = api.open("a.json");
+
+    // Assert
+    assertThat(result.get("definitionWritten").asBoolean()).isFalse();
+    assertThat(result.get("designerDataDeferred").get(0).asText()).isEqualTo("pay");
+    assertThat(reopened.get("designerData").get("steps").get("s1").get("sampleResponse").asText())
+        .isEqualTo("{}");
+  }
+
+  @Test
+  void save_validChangeWithUnreadableDesignerData_reportsTheWriteAndItsNewSha() throws Exception {
+    // Arrange
+    Files.writeString(dir.resolve("a.json"), VALID);
+    Files.createDirectory(dir.resolve(".designer"));
+    Files.write(dir.resolve(".designer/a.json"), new byte[] {'"', (byte) 0xE9, '"'});
+    ObjectNode model = EditorModel.fromDefinition(json(VALID));
+    model.put("version", "1.1");
+
+    // Act
+    ObjectNode result =
+        api.save("a.json", saveRequest(model, DesignerData.empty(), Workspace.sha256(VALID)));
+
+    // Assert
+    assertThat(result.get("definitionWritten").asBoolean()).isTrue();
+    assertThat(result.get("sha256").asText())
+        .isEqualTo(Workspace.sha256(Files.readString(dir.resolve("a.json"))));
+    assertThat(result.get("designerDataError").asText()).contains("UTF-8");
+  }
+
+  @Test
+  void save_untouchedFileWithFieldsInAnotherOrder_writesNothing() throws Exception {
+    // Arrange
+    String text =
+        """
+        {"version": "1", "name": "order", "steps": [{"service": "payment", "name": "charge",
+          "compensation": {"path": "/refunds"}, "execution": {"path": "/charges"}}]}
+        """;
+    Files.writeString(dir.resolve("a.json"), text);
+    ObjectNode model = EditorModel.fromDefinition(json(text));
+    ObjectNode validateRequest = modelRequest(model);
+    validateRequest.put("file", "a.json");
+
+    // Act
+    ObjectNode result =
+        api.save("a.json", saveRequest(model, DesignerData.empty(), Workspace.sha256(text)));
+    ObjectNode validation = api.validate(validateRequest);
+
+    // Assert
+    assertThat(result.get("unchanged").asBoolean()).isTrue();
+    assertThat(Files.readString(dir.resolve("a.json"))).isEqualTo(text);
+    assertThat(validation.get("sameVersion").asBoolean()).isFalse();
   }
 
   @Test
