@@ -176,3 +176,130 @@ export function convertValue(value, kind) {
 export function numberOrNull(text) {
   return text.trim() === "" ? null : text.trim();
 }
+
+/**
+ * The version with its last number raised by one, keeping its width: 1.9 becomes 1.10, v2 becomes
+ * v3, rc09 becomes rc10. Null when the version has no number to raise.
+ */
+export function bumpVersion(version) {
+  const match = /^(.*?)(\d+)(\D*)$/.exec(version ?? "");
+  if (!match) {
+    return null;
+  }
+  const [, head, digits, tail] = match;
+  const raised = (BigInt(digits) + 1n).toString().padStart(digits.length, "0");
+  return head + raised + tail;
+}
+
+export const RECOVERY_STRATEGIES = ["BACKWARD", "FORWARD", "MIXED"];
+
+/** The index of the step marked as the pivot, or -1. */
+export function pivotIndex(model) {
+  return (model.steps ?? []).findIndex((step) => step?.pivot === true);
+}
+
+/**
+ * Sets the recovery strategy, in place. Choosing MIXED marks the second-to-last step as the pivot
+ * when none is marked; any other strategy clears the pivot, which only MIXED allows. BACKWARD, the
+ * default, leaves the field out.
+ */
+export function setRecoveryStrategy(model, strategy) {
+  Object.assign(model, withField(model, "recoveryStrategy", strategy === "BACKWARD" ? null : strategy));
+  const steps = model.steps ?? [];
+  if (strategy === "MIXED") {
+    if (pivotIndex(model) < 0 && steps.length > 0) {
+      setPivot(model, Math.max(steps.length - 2, 0));
+    }
+  } else {
+    setPivot(model, -1);
+  }
+}
+
+/** Marks one step as the pivot and clears the mark on every other, in place; -1 clears them all. */
+export function setPivot(model, index) {
+  (model.steps ?? []).forEach((step, i) => {
+    if (step && !("raw" in step) && (i === index || step.pivot !== null)) {
+      Object.assign(step, withField(step, "pivot", i === index ? true : null));
+    }
+  });
+}
+
+/**
+ * Why a step's compensation can never run, or null when it can. Under FORWARD nothing is
+ * compensated; under MIXED, nothing after the pivot is.
+ */
+export function compensationNeverRuns(model, index) {
+  if (model.mode === "TCC") {
+    return null;
+  }
+  if (model.recoveryStrategy === "FORWARD") {
+    return "Never runs: under FORWARD a failed step is retried forward, and nothing is compensated.";
+  }
+  const pivot = pivotIndex(model);
+  if (model.recoveryStrategy === "MIXED" && pivot >= 0 && index > pivot) {
+    return "Never runs: this step comes after the pivot, so a failure here is retried forward.";
+  }
+  return null;
+}
+
+const MODE_PHASES = {
+  TCC: [
+    ["execution", "reservation"],
+    ["compensation", "cancellation"],
+  ],
+  SAGA: [
+    ["reservation", "execution"],
+    ["cancellation", "compensation"],
+  ],
+};
+
+/**
+ * Switches the mode, in place, and returns what the switch drops, in words. SAGA to TCC turns each
+ * execution into a reservation and each compensation into a cancellation, leaves the confirmation
+ * to be written, and drops the recovery strategy and the pivot, which TCC does not have. TCC to
+ * SAGA reverses this and drops the confirmations.
+ */
+export function switchMode(model, mode) {
+  const dropped = [];
+  if (mode === "TCC") {
+    if (model.recoveryStrategy !== null && model.recoveryStrategy !== undefined) {
+      dropped.push(`the recovery strategy ${model.recoveryStrategy}`);
+    }
+    Object.assign(model, withField(model, "recoveryStrategy", null));
+  }
+  for (const step of model.steps ?? []) {
+    if (!step || "raw" in step) {
+      continue;
+    }
+    const name = step.name || "a step";
+    // A class step keeps its phases, but its pivot mark goes like any other: TCC has no pivot.
+    if (mode === "TCC" && step.pivot !== null && step.pivot !== undefined) {
+      dropped.push(`the pivot mark on ${name}`);
+      Object.assign(step, withField(step, "pivot", null));
+    }
+    if (isReadOnly(step)) {
+      continue;
+    }
+    const phases = { ...step.phases };
+    for (const [from, to] of MODE_PHASES[mode] ?? []) {
+      if (from in phases) {
+        if (phases[from] !== null && phases[to] !== null && phases[to] !== undefined) {
+          dropped.push(`the ${to} call of ${name}, replaced by its ${from}`);
+        }
+        phases[to] = phases[from] ?? phases[to] ?? null;
+        delete phases[from];
+      }
+    }
+    if (mode === "TCC") {
+      phases.confirmation = phases.confirmation ?? null;
+    } else if ("confirmation" in phases) {
+      if (phases.confirmation !== null) {
+        dropped.push(`the confirmation call of ${name}`);
+      }
+      delete phases.confirmation;
+    }
+    step.phases = phases;
+  }
+  Object.assign(model, withField(model, "mode", mode));
+  return dropped;
+}

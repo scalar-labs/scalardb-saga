@@ -38,7 +38,7 @@ export function NumberField({ label, value, onChange, placeholder }) {
 }
 
 /** Name and value rows, such as a call's query or output. Null rows mean the field is absent. */
-export function Rows({ title, rows, onChange, nameLabel, valueLabel, namePlaceholder, valuePlaceholder, hint }) {
+export function Rows({ title, rows, onChange, nameLabel, valueLabel, namePlaceholder, valuePlaceholder, hint, flag }) {
   const list = rows || [];
   const set = (index, key, text) =>
     onChange(list.map((row, i) => (i === index ? { ...row, [key]: text } : row)));
@@ -82,6 +82,7 @@ export function Rows({ title, rows, onChange, nameLabel, valueLabel, namePlaceho
         >
           ${icons.close}
         </button>
+        ${flag?.(row) && html`<p class="warn-text kv-note" role="note">${icons.error} ${flag(row)}</p>`}
       </div>`,
     )}
   </div>`;

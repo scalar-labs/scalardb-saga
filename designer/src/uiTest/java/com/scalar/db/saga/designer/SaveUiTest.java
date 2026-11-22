@@ -224,7 +224,7 @@ class SaveUiTest extends UiTestSupport {
 
     // Assert
     assertThat(button("No problems")).isVisible();
-    assertThat(page.locator(".card .chip")).hasCount(0);
+    assertThat(page.locator(".card .chip.err")).hasCount(0);
   }
 
   @Test

@@ -29,7 +29,13 @@ export function FieldsEditor({ fields, onChange, keys, label, depth = 0 }) {
           keys=${keys}
           label=${`${label} field ${index + 1}`}
           depth=${depth}
-          onChange=${(value) => set(index, { ...field, value })}
+          onChange=${(value) =>
+            // Picking a key names an unnamed field after it.
+            set(index, {
+              ...field,
+              name: field.name === "" && value.kind === "context" && value.key ? value.key : field.name,
+              value,
+            })}
         />
         <button
           class="icon-btn danger"
@@ -56,7 +62,6 @@ export function FieldsEditor({ fields, onChange, keys, label, depth = 0 }) {
  * list. A context key exported as a whole "${key}" keeps the value's type in the JSON body.
  */
 export function ValueEditor({ value, onChange, keys, label, depth }) {
-  const listId = `${label.replaceAll(" ", "-")}-keys`;
   return html`<div class="val">
     <select
       class="in"
@@ -66,18 +71,7 @@ export function ValueEditor({ value, onChange, keys, label, depth }) {
     >
       ${KINDS.map(([kind, text]) => html`<option value=${kind}>${text}</option>`)}
     </select>
-    ${value.kind === "context" &&
-    html`<input
-        class="in mono"
-        aria-label=${`${label} context key`}
-        placeholder="orderId"
-        list=${listId}
-        value=${value.key}
-        onInput=${(event) => onChange({ ...value, key: event.currentTarget.value })}
-      />
-      <datalist id=${listId}>
-        ${keys.map((key) => html`<option value=${key.key}>${key.from}</option>`)}
-      </datalist>`}
+    ${value.kind === "context" && html`<${KeyPicker} value=${value} keys=${keys} label=${label} onChange=${onChange} />`}
     ${value.kind === "template" &&
     html`<input
       class="in mono"
@@ -103,6 +97,37 @@ export function ValueEditor({ value, onChange, keys, label, depth }) {
       depth=${depth + 1}
       onChange=${(items) => onChange({ ...value, items })}
     />`}
+  </div>`;
+}
+
+/**
+ * A context key, picked from the keys available at this call. A key that is not available, such as
+ * one an earlier step stopped capturing, stays selected and is flagged, never dropped. The step's
+ * own outputs are listed but cannot be picked in a compensation or cancellation.
+ */
+function KeyPicker({ value, keys, label, onChange }) {
+  const entry = keys.find((key) => key.key === value.key);
+  const missing = value.key !== "" && (!entry || entry.own);
+  return html`<div class="picker">
+    <select
+      class=${"in mono" + (missing ? " bad" : "")}
+      aria-label=${`${label} context key`}
+      aria-invalid=${missing ? "true" : undefined}
+      value=${value.key}
+      onChange=${(event) => onChange({ ...value, key: event.currentTarget.value })}
+    >
+      <option value="" disabled>Choose a key</option>
+      ${keys.map(
+        (key) => html`<option value=${key.key} disabled=${key.own}>
+          ${key.key} · ${key.own ? "this step's own output" : key.from}
+        </option>`,
+      )}
+      ${missing && !entry && html`<option value=${value.key}>${value.key} · not available here</option>`}
+    </select>
+    ${missing &&
+    html`<span class="err-text small" role="note">
+      ${icons.error} ${entry?.own ? "This step's own output: a compensation cannot read it" : "Not available here"}
+    </span>`}
   </div>`;
 }
 

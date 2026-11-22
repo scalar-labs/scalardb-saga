@@ -163,13 +163,16 @@ class EditorUiTest extends UiTestSupport {
     execution.getByLabel("charge execution body field 3 kind").selectOption("object");
     execution.getByText("Add field").nth(0).click();
     execution.getByLabel("charge execution body field 3 field 1 name").fill("city");
-    execution.getByLabel("charge execution body field 3 field 1 context key").fill("city");
+    execution
+        .getByLabel("charge execution body field 3 field 1 context key")
+        .selectOption("orderId");
     button("Save").click();
 
     // Assert
     assertThat(toast()).containsText("Saved");
     JsonNode saved = DefinitionFormats.read(read("order-saga-pivot.json"), Format.JSON);
-    assertThat(saved.at("/steps/0/execution/jsonBody/shipping/city").asText()).isEqualTo("${city}");
+    assertThat(saved.at("/steps/0/execution/jsonBody/shipping/city").asText())
+        .isEqualTo("${orderId}");
   }
 
   @Test
@@ -417,6 +420,31 @@ class EditorUiTest extends UiTestSupport {
     // Assert
     assertThat(String.valueOf(keys))
         .isEqualTo("[{key=hold, from=a}, {key=seat, from=b}, {key=done, from=a}]");
+  }
+
+  @Test
+  void keysFor_tccCancellation_marksOnlyTheOwnReservationAsOwn() throws Exception {
+    // Arrange
+    page.navigate(url());
+
+    // Act
+    Object keys =
+        page.evaluate(
+            """
+            async () => {
+              const { keysFor } = await import("/context.js");
+              const call = (name) => ({ output: [{ name, value: "$." + name }] });
+              const model = { mode: "TCC", steps: [
+                { name: "a", phases: { reservation: call("status") } },
+                { name: "b", phases: { reservation: call("seat"), confirmation: call("status") } },
+              ] };
+              return keysFor(model, 1, "cancellation");
+            }
+            """);
+
+    // Assert
+    assertThat(String.valueOf(keys))
+        .isEqualTo("[{key=status, from=a}, {key=seat, from=b, own=true}]");
   }
 
   /** The keys for a call of two TCC steps that each capture a key in both forward phases. */
