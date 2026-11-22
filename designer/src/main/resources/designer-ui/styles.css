@@ -901,3 +901,139 @@ pre.code {
 .toast .btn {
   color: var(--fg);
 }
+
+/* The guided parts: key picker, sample capture, recovery strategy and pivot */
+.warn-text {
+  color: var(--warn);
+}
+
+.err-text.small,
+.warn-text.kv-note {
+  font-size: 12px;
+}
+
+.kv-note {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.picker {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.in.bad {
+  border-color: var(--err);
+  color: var(--err);
+}
+
+.def-id .mode {
+  width: auto;
+}
+
+.call.dim > :not(h3, .never) {
+  opacity: 0.6;
+}
+
+.never {
+  margin: 0;
+  font-style: italic;
+}
+
+.context-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r);
+}
+
+.tok.static {
+  cursor: default;
+}
+
+.tok.static:hover {
+  border-color: var(--line-strong);
+  color: inherit;
+}
+
+.tok small {
+  color: var(--muted);
+}
+
+.tree,
+.tree ul {
+  list-style: none;
+  margin: 0;
+  padding-left: 0;
+}
+
+.tree ul {
+  padding-left: 18px;
+  border-left: 1px solid var(--line);
+  margin-left: 6px;
+}
+
+.capture-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.capture-row .preview {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+.btn.captured {
+  border-color: var(--ok);
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.card-row.after-pivot .card {
+  background: var(--surface-2);
+}
+
+.no-return {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--warn);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.no-return::before,
+.no-return::after {
+  content: "";
+  flex: 1;
+  border-top: 2px dashed var(--warn);
+}
+
+.choice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  cursor: pointer;
+}
+
+.choice small {
+  display: block;
+}
+
+.toggle.pivot {
+  padding: 6px 10px;
+  border-radius: var(--r);
+  background: var(--warn-soft);
+}

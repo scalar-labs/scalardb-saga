@@ -9,9 +9,12 @@ import { FilesView } from "./components/files.js";
 import { icons } from "./components/icons.js";
 import { StepEditor } from "./components/step.js";
 import { StepList } from "./components/steps.js";
-import { keysFor } from "./context.js";
+import { inputKeys, keysFor, missingInputKeys, withInputKeys } from "./context.js";
 import { html } from "./html.js";
-import { duplicateStep, moveStep, newDefinition, newStep, withField } from "./model.js";
+import { RecoveryPanel, SampleInputPanel } from "./components/panels.js";
+import { bumpVersion, duplicateStep, moveStep, newDefinition, newStep, setRecoveryStrategy, switchMode, withField } from "./model.js";
+
+const MODES = ["SAGA", "TCC"];
 
 const VALIDATE_DELAY_MS = 300;
 
@@ -84,6 +87,7 @@ function App() {
   const [recheck, setRecheck] = useState(0);
   const revision = useRef(0);
   const session = useRef(0);
+  const versionInput = useRef(null);
 
   const refreshWorkspace = useCallback(
     () =>
@@ -110,7 +114,9 @@ function App() {
   }, [toast]);
 
   const modelJson = doc && JSON.stringify(doc.model);
-  const dirty = doc !== null && modelJson !== doc.openedJson;
+  const dataJson = doc && JSON.stringify(doc.designerData);
+  // Unsaved: the definition or its designer data, the samples, differs from what the files hold.
+  const dirty = doc !== null && (modelJson !== doc.openedJson || dataJson !== doc.openedDataJson);
 
   // Validation runs a moment after the last edit. Every edit takes a new revision at once, and an
   // answer for any other revision is dropped, so an answer for an earlier model is never shown,
@@ -157,7 +163,8 @@ function App() {
   // edits made while it was on its way are stored again.
   const restorePending = dialog?.type === "restore";
   useLayoutEffect(() => {
-    if (doc && workspace && !restorePending && (doc.isNew || modelJson !== doc.loadedJson)) {
+    const changed = doc && (doc.isNew || modelJson !== doc.loadedJson || dataJson !== doc.loadedDataJson);
+    if (changed && workspace && !restorePending) {
       writeDraft(workspace.workspace, doc.file, {
         model: doc.model,
         designerData: doc.designerData,
@@ -167,7 +174,7 @@ function App() {
         savedAt: Date.now(),
       });
     }
-  }, [doc?.model, doc?.loadedJson, doc?.isNew, restorePending]);
+  }, [doc?.model, doc?.designerData, doc?.loadedJson, doc?.loadedDataJson, doc?.isNew, restorePending]);
 
   /** Shows the file list, leaving the open document behind. */
   const close = () => {
@@ -182,15 +189,26 @@ function App() {
     session.current = ++lastSession;
     // Drops any validation answer still on its way for the previous document.
     revision.current++;
+    // Keys the calls read that neither the input nor any step provides are taken as input keys, so a
+    // working file does not open covered in "not available here".
+    const sampleInput = withInputKeys(
+      next.designerData.sampleInput,
+      missingInputKeys(next.model, inputKeys(next.designerData.sampleInput).keys),
+    );
+    const designerData = sampleInput === null ? next.designerData : { ...next.designerData, sampleInput };
     const loadedJson = JSON.stringify(next.model);
+    const loadedDataJson = JSON.stringify(designerData);
     // A new or imported file is unsaved from the start, so it counts as changed until saved.
     const openedJson = next.isNew ? "" : loadedJson;
-    setDoc({ ...next, session: session.current, loadedJson, openedJson });
+    const openedDataJson = next.isNew ? "" : loadedDataJson;
+    setDoc({ ...next, designerData, session: session.current, loadedJson, loadedDataJson, openedJson, openedDataJson });
     setValidation({ problems: [], definition: "", sameVersion: false });
     setSelectedId(next.model.steps?.[0]?.id ?? null);
     setToast(null);
     const draft = workspace && readDraft(workspace.workspace, next.file);
-    setDialog(draft && JSON.stringify(draft.model) !== loadedJson ? { type: "restore", draft } : null);
+    const draftDiffers =
+      draft && (JSON.stringify(draft.model) !== loadedJson || (draft.designerData && JSON.stringify(draft.designerData) !== loadedDataJson));
+    setDialog(draftDiffers ? { type: "restore", draft } : null);
   };
 
   const openFile = async (file) => {
@@ -283,20 +301,30 @@ function App() {
       return { ...current, model };
     });
 
+  /** Applies a change to the designer data, if the document of that session is still open. */
+  const editData = (change, forSession = session.current) =>
+    setDoc((current) =>
+      !current || current.session !== forSession ? current : { ...current, designerData: change(current.designerData) },
+    );
+
   const save = async (base = doc.baseSha) => {
     const sent = doc.model;
+    const sentData = doc.designerData;
     const file = doc.file;
     const savedSession = doc.session;
     // The answer belongs to this document only: if another one was opened meanwhile, it is dropped.
     const stillOpen = () => session.current === savedSession;
     setSaving(true);
     try {
-      const result = await api.save(file, sent, doc.designerData, base);
+      const result = await api.save(file, sent, sentData, base);
       if (!stillOpen()) {
         refreshWorkspace();
         return;
       }
       const clean = result.problems.length === 0;
+      // The file on disk now holds the samples as sent, whether this save rewrote it or it already
+      // matched; only an error or a deferred step leaves some of them unsaved.
+      const dataSaved = Boolean(result.sha256) && !result.designerDataError && !result.designerDataDeferred?.length;
       setDoc((current) =>
         current?.session !== savedSession
           ? current
@@ -306,16 +334,18 @@ function App() {
               isNew: result.sha256 ? false : current.isNew,
               openedJson: clean ? JSON.stringify(sent) : current.openedJson,
               loadedJson: clean ? JSON.stringify(sent) : current.loadedJson,
+              openedDataJson: dataSaved ? JSON.stringify(sentData) : current.openedDataJson,
+              loadedDataJson: dataSaved ? JSON.stringify(sentData) : current.loadedDataJson,
             },
       );
-      if (clean && workspace) {
+      if (clean && dataSaved && workspace) {
         writeDraft(workspace.workspace, file, null);
       }
       const notes = [];
       if (result.definitionWritten) {
         notes.push(`Saved ${file}.`);
       } else if (result.unchanged) {
-        notes.push("No changes to the definition.");
+        notes.push(result.designerDataWritten ? "No changes to the definition; samples saved." : "No changes to the definition.");
       } else {
         const count = result.problems.length;
         notes.push(`Not saved: fix the ${count === 1 ? "problem" : `${count} problems`} first. The file on disk is unchanged.`);
@@ -385,6 +415,7 @@ function App() {
   const definitionProblems = validation.problems.filter((problem) => !problem.stepId || !stepIds.has(problem.stepId));
   const index = steps.findIndex((step) => step.id === selectedId);
   const count = validation.problems.length;
+  const input = inputKeys(doc.designerData.sampleInput).keys;
 
   const showFirstProblem = () => {
     const step = steps.find((s) => problemsByStep.has(s.id));
@@ -432,12 +463,25 @@ function App() {
             const name = event.currentTarget.value;
             edit((m) => Object.assign(m, withField(m, "name", name)));
           }} />
-        <input class="in ver mono" aria-label="Version" placeholder="version" value=${model.version ?? ""} onInput=${(event) => {
+        <input ref=${versionInput} class="in ver mono" aria-label="Version" placeholder="version" value=${model.version ?? ""} onInput=${(event) => {
             // An emptied version leaves the field out again, as in a file that never had one.
             const version = event.currentTarget.value || null;
             edit((m) => Object.assign(m, withField(m, "version", version)));
           }} />
-        <span class="chip neutral" title="The definition's mode">${model.mode ?? "SAGA"}</span>
+        <select
+          class="in mode mono"
+          aria-label="Mode"
+          value=${model.mode ?? "SAGA"}
+          onChange=${(event) => {
+            const mode = event.currentTarget.value;
+            // The select shows the model again until the switch is confirmed.
+            event.currentTarget.value = model.mode ?? "SAGA";
+            setDialog({ type: "mode", mode, dropped: switchMode(structuredClone(model), mode) });
+          }}
+        >
+          ${!MODES.includes(model.mode ?? "SAGA") && html`<option value=${model.mode}>${model.mode} (not a mode the engine knows)</option>`}
+          ${MODES.map((mode) => html`<option value=${mode}>${mode}</option>`)}
+        </select>
         ${checkFailed
           ? html`<button
               type="button"
@@ -491,11 +535,25 @@ function App() {
         refuses changed content and rejects the whole reload: change the version to one the server
         has never seen.
       </p>
+      ${bumpVersion(model.version) !== null &&
+      html`<button
+        class="btn small"
+        type="button"
+        onClick=${() => {
+          const version = bumpVersion(model.version);
+          edit((m) => Object.assign(m, withField(m, "version", version)));
+          requestAnimationFrame(() => versionInput.current?.focus());
+        }}
+      >
+        Bump version to ${bumpVersion(model.version)}
+      </button>`}
     </div>`}
     ${doc.warnings?.length > 0 &&
     html`<div class="banner warn" role="status">${doc.warnings.map((warning) => html`<p>${warning}</p>`)}</div>`}
     <div class="main">
       <aside class="rail">
+        ${model.mode !== "TCC" &&
+        html`<${RecoveryPanel} model=${model} onStrategy=${(strategy) => edit((m) => setRecoveryStrategy(m, strategy))} />`}
         <${StepList}
           model=${model}
           selectedId=${selectedId}
@@ -503,6 +561,10 @@ function App() {
           onSelect=${setSelectedId}
           onMove=${(from, to) => edit((m) => moveStep(m, from, to))}
           onAdd=${addStep}
+        />
+        <${SampleInputPanel}
+          text=${doc.designerData.sampleInput}
+          onChange=${(text) => editData((data) => ({ ...data, sampleInput: text }))}
         />
         <${DefinitionPanel}
           model=${model}
@@ -517,9 +579,13 @@ function App() {
               model=${model}
               index=${index}
               problems=${problemsByStep.get(selectedId) ?? []}
-              keysFor=${(phase) => keysFor(model, index, phase)}
+              keysFor=${(phase) => keysFor(model, index, phase, input)}
+              sample=${doc.designerData.steps?.[selectedId]?.sampleResponse ?? null}
               services=${workspace?.services ?? []}
               onChange=${(step) => edit((m) => { m.steps[index] = step; })}
+              onModel=${(change) => edit(change)}
+              onSample=${(text) =>
+                editData((data) => ({ ...data, steps: { ...data.steps, [selectedId]: { ...data.steps?.[selectedId], sampleResponse: text } } }))}
               onDelete=${deleteStep}
               onDuplicate=${() => {
                 const copy = duplicateStep(structuredClone(model), index);
@@ -559,6 +625,31 @@ function App() {
         Reload from disk shows the file as it is now; your edits stay in this browser and are offered
         back. Overwrite replaces the file with your version.
       </p>
+    <//>`}
+    ${dialog?.type === "mode" &&
+    html`<${Dialog}
+      title=${`Switch to ${dialog.mode}?`}
+      onClose=${() => setDialog(null)}
+      footer=${html`<button class="btn" type="button" onClick=${() => setDialog(null)}>Cancel</button>
+        <button
+          class="btn primary"
+          type="button"
+          onClick=${() => {
+            edit((m) => switchMode(m, dialog.mode));
+            setDialog(null);
+          }}
+        >
+          Switch to ${dialog.mode}
+        </button>`}
+    >
+      <p>
+        ${dialog.mode === "TCC"
+          ? "Each execution becomes a reservation and each compensation a cancellation. Every step then needs a confirmation call."
+          : "Each reservation becomes an execution and each cancellation a compensation."}
+      </p>
+      ${dialog.dropped.length > 0
+        ? html`<p>This drops ${dialog.dropped.join(", ")}.</p>`
+        : html`<p class="hint">Nothing is dropped.</p>`}
     <//>`}
     ${dialog?.type === "restore" &&
     html`<${Dialog}

@@ -1,12 +1,12 @@
 import { html } from "../html.js";
-import { isReadOnly, newRetryPolicy, phasesFor, withField } from "../model.js";
+import { compensationNeverRuns, isReadOnly, newRetryPolicy, phasesFor, setPivot, withField } from "../model.js";
 import { CallEditor } from "./call.js";
 import { Extras, NumberField, Problems, TextField } from "./fields.js";
 import { icons } from "./icons.js";
 import { RetryFields } from "./retry.js";
 
 /** The editor of the selected step. */
-export function StepEditor({ model, index, problems, keysFor, services, onChange, onDelete, onDuplicate }) {
+export function StepEditor({ model, index, problems, keysFor, sample, services, onChange, onModel, onSample, onDelete, onDuplicate }) {
   const step = model.steps[index];
   const set = (key, value) => onChange(withField(step, key, value));
   const head = html`<div class="ed-acts">
@@ -30,6 +30,10 @@ export function StepEditor({ model, index, problems, keysFor, services, onChange
     </section>`;
   }
   const phases = phasesFor(model.mode);
+  // The sample response belongs to the step's first call, the one that captures its output.
+  const sampled = phases[0];
+  const here = keysFor(sampled);
+  const mixed = model.mode !== "TCC" && model.recoveryStrategy === "MIXED";
   // Phases the file has that this mode does not use, such as an execution in a TCC definition: kept
   // and shown, so that the parser's problem about them can be fixed here.
   const others = Object.keys(step.phases).filter((phase) => !phases.includes(phase));
@@ -52,6 +56,24 @@ export function StepEditor({ model, index, problems, keysFor, services, onChange
       ${services.map((service) => html`<option value=${service} />`)}
     </datalist>`}
     <${Problems} problems=${problems} />
+    ${mixed &&
+    html`<label class="toggle pivot">
+      <input
+        type="checkbox"
+        checked=${step.pivot === true}
+        onChange=${(event) => {
+          const checked = event.currentTarget.checked;
+          onModel((m) => setPivot(m, checked ? index : -1));
+        }}
+      />
+      Pivot: the point of no return. A failure after it is retried forward, never compensated.
+    </label>`}
+    <div class="context-bar" role="group" aria-label="Context here">
+      <span class="lbl">Context here</span>
+      ${here.length === 0
+        ? html`<span class="hint">Nothing yet: add keys to the sample input, or capture output in an earlier step.</span>`
+        : here.map((key) => html`<span class="tok static" title=${`from ${key.from}`}>${key.key}<small> · ${key.from}</small></span>`)}
+    </div>
     ${[...phases, ...others].map(
       (phase) => html`<${CallEditor}
         key=${phase}
@@ -59,6 +81,9 @@ export function StepEditor({ model, index, problems, keysFor, services, onChange
         phase=${phase}
         call=${step.phases[phase] ?? null}
         keys=${keysFor(phase)}
+        neverRuns=${phase === "compensation" ? compensationNeverRuns(model, index) : null}
+        sample=${phase === sampled ? (sample ?? null) : undefined}
+        onSample=${onSample}
         onChange=${(call) =>
           onChange({
             ...step,

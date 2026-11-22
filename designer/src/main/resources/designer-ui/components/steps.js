@@ -1,6 +1,6 @@
 import { useState } from "preact/hooks";
 import { html } from "../html.js";
-import { isReadOnly, phasesFor } from "../model.js";
+import { isReadOnly, phasesFor, pivotIndex } from "../model.js";
 import { icons } from "./icons.js";
 
 /**
@@ -13,15 +13,18 @@ export function StepList({ model, selectedId, problemsByStep, onSelect, onMove, 
   const [over, setOver] = useState(null);
   const steps = model.steps ?? [];
   const last = steps.length - 1;
+  // Under MIXED, a line marks the point of no return below the pivot, and the steps after it,
+  // which are only ever retried forward, are shaded.
+  const pivot = model.mode !== "TCC" && model.recoveryStrategy === "MIXED" ? pivotIndex(model) : -1;
   return html`<section class="panel" aria-label="Steps">
     <div class="panel-h"><h2 class="lbl">Steps</h2></div>
     <ol class="steps">
       ${steps.map((step, index) => {
         const count = problemsByStep.get(step.id)?.length ?? 0;
         const name = step.name || (isReadOnly(step) ? "(not editable)" : "(no name)");
-        return html`<li
+        const row = html`<li
           key=${step.id}
-          class=${"card-row" + (over === index && dragging !== null && dragging !== index ? " drop" : "")}
+          class=${"card-row" + (over === index && dragging !== null && dragging !== index ? " drop" : "") + (pivot >= 0 && index > pivot ? " after-pivot" : "")}
           onDragOver=${(event) => {
             if (dragging !== null) {
               event.preventDefault();
@@ -62,6 +65,7 @@ export function StepList({ model, selectedId, problemsByStep, onSelect, onMove, 
           >
             <span class="num">${index + 1}</span>
             <span class="t">${name}</span>
+            ${index === pivot && html`<span class="chip warn st">pivot</span>`}
             <span class="svc">${step.service || ""}</span>
             <span class="route">
               ${route(model, step)}
@@ -90,6 +94,9 @@ export function StepList({ model, selectedId, problemsByStep, onSelect, onMove, 
             </button>
           </div>
         </li>`;
+        return index === pivot
+          ? [row, html`<li key="no-return" class="no-return" role="separator" aria-label="Point of no return">Point of no return</li>`]
+          : row;
       })}
     </ol>
     ${model.steps === null

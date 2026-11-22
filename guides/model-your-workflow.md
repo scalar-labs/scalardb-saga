@@ -594,6 +594,8 @@ For the fields of a call, see [Describe a call](#describe-a-call).
 
 ## Next steps
 
+- [Design a Definition](design-a-definition.md): build and edit definitions in a browser, with the
+  server's own checks on every edit.
 - [Run Saga Transactions](run-saga-transactions.md): start sagas from an application and act on
   their outcome.
 - [ScalarDB Saga Configurations](configurations.md): configure the server that runs your
