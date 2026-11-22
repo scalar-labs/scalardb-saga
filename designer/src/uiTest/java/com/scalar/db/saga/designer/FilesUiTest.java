@@ -94,4 +94,96 @@ class FilesUiTest extends UiTestSupport {
     assertThat(toast()).containsText("Saved imported.yaml");
     assertThat(read("imported.yaml")).contains("version: \"1.10\"");
   }
+
+  @Test
+  void newDefinition_leftBeforeSaving_isListedAndOpensAgain() throws Exception {
+    // Arrange
+    page.navigate(url());
+    button("New definition").click();
+    page.getByRole(AriaRole.DIALOG).getByLabel("Saga name").fill("order");
+    button("Create").click();
+    page.getByLabel("Saga name").fill("order-renamed");
+    button("Files").click();
+
+    // Act
+    page.reload();
+    button("Open order.json").click();
+
+    // Assert
+    assertThat(page.getByLabel("Saga name")).hasValue("order-renamed");
+    assertThat(page.getByRole(AriaRole.DIALOG)).hasCount(0);
+  }
+
+  @Test
+  void importFile_leftUntouched_isListedUntilSaved() throws Exception {
+    // Arrange
+    page.navigate(url());
+    page.getByLabel("Import a definition file")
+        .setInputFiles(
+            new FilePayload(
+                "imported.yaml",
+                "application/yaml",
+                IMPORTED_YAML.getBytes(StandardCharsets.UTF_8)));
+    assertThat(page.getByLabel("Saga name")).hasValue("imported");
+    button("Files").click();
+    assertThat(region("Not saved yet")).containsText("imported.yaml");
+
+    // Act
+    button("Open imported.yaml").click();
+    button("Save").click();
+    assertThat(toast()).containsText("Saved imported.yaml");
+    button("Files").click();
+
+    // Assert
+    assertThat(region("Not saved yet")).hasCount(0);
+    assertThat(page.locator(".file-table tbody tr")).hasCount(1);
+    assertThat(read("imported.yaml")).contains("version: \"1.10\"");
+  }
+
+  @Test
+  void discardDraft_browserOnlyDefinition_removesItUntilUndone() throws Exception {
+    // Arrange
+    page.navigate(url());
+    button("New definition").click();
+    page.getByRole(AriaRole.DIALOG).getByLabel("Saga name").fill("order");
+    button("Create").click();
+    button("Files").click();
+
+    // Act
+    button("Discard order.json").click();
+
+    // Assert
+    assertThat(region("Not saved yet")).hasCount(0);
+    button("Undo").click();
+    assertThat(button("Open order.json")).isVisible();
+  }
+
+  @Test
+  void newDefinition_nameOfABrowserOnlyDraft_cannotBeCreated() throws Exception {
+    // Arrange
+    page.navigate(url());
+    button("New definition").click();
+    page.getByRole(AriaRole.DIALOG).getByLabel("Saga name").fill("order");
+    button("Create").click();
+    button("Files").click();
+
+    // Act
+    button("New definition").click();
+    page.getByRole(AriaRole.DIALOG).getByLabel("Saga name").fill("order");
+
+    // Assert
+    assertThat(button("Create")).isDisabled();
+    assertThat(page.getByRole(AriaRole.ALERT)).containsText("already exists");
+  }
+
+  private static final String IMPORTED_YAML =
+      """
+      name: imported
+      version: "1.10"
+      steps:
+        - name: charge
+          service: payment
+          execution: {method: POST, path: /charge}
+          compensation: {method: POST, path: /refund}
+      """;
 }

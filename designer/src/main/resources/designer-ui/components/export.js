@@ -4,13 +4,13 @@ import { html } from "../html.js";
 import { Dialog } from "./dialog.js";
 
 /** Downloads: the definition in either format, its service-file templates, or both as a zip. */
-export function ExportDialog({ model, definitionText, problemCount, defaultFormat, onClose, onError }) {
+export function ExportDialog({ model, definitionText, problemCount, checkState, defaultFormat, onClose, onError }) {
   const [format, setFormat] = useState(defaultFormat);
   const [templates, setTemplates] = useState(null);
   useEffect(() => {
     api.serviceTemplates(model).then((result) => setTemplates(result.templates), onError);
   }, []);
-  const blocked = problemCount > 0;
+  const blocked = problemCount > 0 || checkState !== "checked";
   const download = (path) => api.download(path, { model, format }).catch(onError);
   return html`<${Dialog}
     title="Export"
@@ -35,7 +35,14 @@ export function ExportDialog({ model, definitionText, problemCount, defaultForma
         </button>
       </div>
     </div>
-    ${blocked &&
+    ${checkState === "checking" && html`<p class="hint" role="status">Checking the definition…</p>`}
+    ${checkState === "failed" &&
+    html`<p class="err-text" role="alert">
+      The definition could not be checked, so it is not offered for download. Close this and check
+      it again.
+    </p>`}
+    ${checkState === "checked" &&
+    problemCount > 0 &&
     html`<p class="err-text" role="alert">
       Fix the ${problemCount === 1 ? "problem" : `${problemCount} problems`} first: a definition the
       server would refuse is not offered for download.

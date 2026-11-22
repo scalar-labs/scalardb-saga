@@ -6,7 +6,7 @@ import { icons } from "./icons.js";
 const FILE_NAME = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,199}\.(json|yaml|yml)$/i;
 
 /** The workspace's definition files, with New and Import. */
-export function FilesView({ workspace, onOpen, onNew, onImport, error }) {
+export function FilesView({ workspace, drafts, onOpen, onOpenDraft, onDiscardDraft, onNew, onImport, error }) {
   const upload = useRef(null);
   const [creating, setCreating] = useState(false);
   return html`<main class="files" aria-label="Definition files">
@@ -65,6 +65,38 @@ export function FilesView({ workspace, onOpen, onNew, onImport, error }) {
       </tbody>
     </table>`}
     ${workspace && workspace.files.length === 0 && html`<p class="hint">No definition files here yet.</p>`}
+    ${drafts.length > 0 &&
+    html`<section aria-label="Not saved yet">
+      <h2>Not saved yet</h2>
+      <p class="hint">New and imported definitions kept in this browser until you save them.</p>
+      <table class="file-table">
+        <thead>
+          <tr>
+            <th scope="col">File</th>
+            <th scope="col">Saga</th>
+            <th scope="col">Version</th>
+            <th scope="col"><span class="sr">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${drafts.map(
+            (draft) => html`<tr>
+              <td class="mono">${draft.file}</td>
+              <td>${draft.name ?? ""}</td>
+              <td class="mono">${draft.version ?? ""}</td>
+              <td class="right">
+                <button class="btn small" type="button" aria-label=${`Open ${draft.file}`} onClick=${() => onOpenDraft(draft.file)}>
+                  Open
+                </button>
+                <button class="btn small danger" type="button" aria-label=${`Discard ${draft.file}`} onClick=${() => onDiscardDraft(draft.file)}>
+                  Discard
+                </button>
+              </td>
+            </tr>`,
+          )}
+        </tbody>
+      </table>
+    </section>`}
     ${workspace?.uneditable?.length > 0 &&
     html`<p class="hint">
       The server also loads ${workspace.uneditable.join(", ")}, but the designer edits only files named
@@ -73,7 +105,7 @@ export function FilesView({ workspace, onOpen, onNew, onImport, error }) {
     </p>`}
     ${creating &&
     html`<${NewDialog}
-      existing=${new Set(workspace?.files.map((file) => file.file) ?? [])}
+      existing=${new Set([...(workspace?.files.map((file) => file.file) ?? []), ...drafts.map((draft) => draft.file)])}
       onClose=${() => setCreating(false)}
       onCreate=${(name, fileName) => {
         setCreating(false);
@@ -92,7 +124,7 @@ function NewDialog({ existing, onClose, onCreate }) {
     : !FILE_NAME.test(fileName)
       ? "Use letters, digits, \".\", \"_\" and \"-\", so the name also works as a file name."
       : existing.has(fileName)
-        ? `${fileName} already exists. Open it instead, or choose another name.`
+        ? `${fileName} already exists, in the workspace or as a draft in this browser. Open it instead, or choose another name.`
         : null;
   const create = () => !problem && onCreate(name.trim(), fileName);
   return html`<${Dialog}

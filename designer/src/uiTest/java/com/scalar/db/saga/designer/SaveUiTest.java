@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -224,6 +225,81 @@ class SaveUiTest extends UiTestSupport {
     // Assert
     assertThat(button("No problems")).isVisible();
     assertThat(page.locator(".card .chip")).hasCount(0);
+  }
+
+  @Test
+  void save_editsMadeWhileItRuns_areKeptForTheNextVisit() throws Exception {
+    // Arrange
+    copyGettingStarted("order-saga.json");
+    AtomicReference<Route> held = new AtomicReference<>();
+    page.route(
+        "**/api/files/order-saga.json",
+        route -> {
+          if (route.request().method().equals("PUT") && held.get() == null) {
+            held.set(route);
+          } else {
+            route.resume();
+          }
+        });
+    open("order-saga.json");
+    page.getByLabel("Saga name").fill("saved-name");
+    button("Save").click();
+    page.waitForCondition(() -> held.get() != null);
+    page.getByLabel("Saga name").fill("later-name");
+
+    // Act
+    page.waitForResponse("**/api/files/order-saga.json", () -> requireNonNull(held.get()).resume());
+    assertThat(toast()).containsText("Saved");
+    open("order-saga.json");
+
+    // Assert
+    assertThat(page.getByLabel("Saga name")).hasValue("saved-name");
+    button("Restore").click();
+    assertThat(page.getByLabel("Saga name")).hasValue("later-name");
+  }
+
+  @Test
+  void validate_answerForAnEarlierEdit_isNotShownForTheCurrentModel() throws Exception {
+    // Arrange
+    copyGettingStarted("order-saga.json");
+    open("order-saga.json");
+    assertThat(button("No problems")).isVisible();
+    List<Route> held = new CopyOnWriteArrayList<>();
+    page.route("**/api/validate", held::add);
+    region("Execution").getByLabel("charge execution method").selectOption("GET");
+    page.waitForCondition(() -> held.size() == 1);
+
+    // Act
+    region("Execution").getByLabel("charge execution method").selectOption("POST");
+    page.waitForResponse("**/api/validate", () -> held.get(0).resume());
+
+    // Assert
+    // The model is back to what the first check found valid, and the next request is still held.
+    assertThat(page.locator(".chip.err")).hasCount(0);
+    assertThat(button("No problems")).isVisible();
+    page.waitForCondition(() -> held.size() == 2);
+    held.get(1).resume();
+  }
+
+  @Test
+  void validate_requestFailed_saysSoAndChecksAgainOnRequest() throws Exception {
+    // Arrange
+    copyGettingStarted("order-saga.json");
+    open("order-saga.json");
+    assertThat(button("No problems")).isVisible();
+    page.route("**/api/validate", Route::abort);
+
+    // Act
+    page.getByLabel("Saga name").fill("renamed");
+
+    // Assert
+    assertThat(button("The check failed; check again")).isVisible();
+    button("Export").click();
+    assertThat(button("Download the definition")).isDisabled();
+    page.keyboard().press("Escape");
+    page.unroute("**/api/validate");
+    button("The check failed; check again").click();
+    assertThat(button("No problems")).isVisible();
   }
 
   private static List<String> entries(Download download) throws IOException {

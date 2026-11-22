@@ -9,7 +9,7 @@ import { FilesView } from "./components/files.js";
 import { icons } from "./components/icons.js";
 import { StepEditor } from "./components/step.js";
 import { StepList } from "./components/steps.js";
-import { keysBefore } from "./context.js";
+import { keysFor } from "./context.js";
 import { html } from "./html.js";
 import { duplicateStep, moveStep, newDefinition, newStep, withField } from "./model.js";
 
@@ -33,6 +33,31 @@ function readDraft(workspace, file) {
   }
 }
 
+/**
+ * The definitions that exist only as drafts in this browser: new or imported ones never saved to
+ * the workspace, newest first.
+ */
+function browserOnlyDrafts(workspace) {
+  const prefix = draftKey(workspace.workspace, "");
+  const inWorkspace = new Set(workspace.files.map((file) => file.file));
+  const drafts = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      const file = key?.startsWith(prefix) ? key.slice(prefix.length) : null;
+      if (file && !inWorkspace.has(file)) {
+        const draft = readDraft(workspace.workspace, file);
+        if (draft?.isNew && draft.model) {
+          drafts.push({ file, name: draft.model.name, version: draft.model.version, savedAt: draft.savedAt });
+        }
+      }
+    }
+  } catch {
+    // Storage is blocked: there are no drafts to list.
+  }
+  return drafts.sort((a, b) => b.savedAt - a.savedAt);
+}
+
 function writeDraft(workspace, file, draft) {
   try {
     if (draft) {
@@ -54,6 +79,9 @@ function App() {
   const [dialog, setDialog] = useState(null);
   const [toast, setToast] = useState(null);
   const [saving, setSaving] = useState(false);
+  // Bumped to show the file list again after a draft is discarded, or to check the model again.
+  const [, setDraftsChanged] = useState(0);
+  const [recheck, setRecheck] = useState(0);
   const revision = useRef(0);
   const session = useRef(0);
 
@@ -81,16 +109,20 @@ function App() {
     return () => clearTimeout(timer);
   }, [toast]);
 
-  const dirty = doc !== null && JSON.stringify(doc.model) !== doc.openedJson;
+  const modelJson = doc && JSON.stringify(doc.model);
+  const dirty = doc !== null && modelJson !== doc.openedJson;
 
-  // Validation runs a moment after the last edit. Each request carries a revision, and a response
-  // older than the newest request is dropped, so a slow answer never overwrites a newer one.
+  // Validation runs a moment after the last edit. Every edit takes a new revision at once, and an
+  // answer for any other revision is dropped, so an answer for an earlier model is never shown,
+  // even one that arrives before the next request is sent. The results also record the model
+  // they describe, so the page can tell whether they still apply to what is on screen.
   useEffect(() => {
     if (!doc) {
       return undefined;
     }
+    const current = ++revision.current;
+    const sentJson = modelJson;
     const timer = setTimeout(() => {
-      const current = ++revision.current;
       api.validate(current, doc.model, doc.isNew ? undefined : doc.file).then(
         (result) => {
           if (result.revision === revision.current) {
@@ -98,30 +130,44 @@ function App() {
               problems: result.problems,
               definition: result.definition,
               sameVersion: result.sameVersion,
+              modelJson: sentJson,
             });
           }
         },
-        (error) => notify(`Validation failed: ${error.message}`),
+        (error) => {
+          if (current === revision.current) {
+            setValidation((previous) => ({ ...previous, failed: error.message }));
+            notify(`Validation failed: ${error.message}`);
+          }
+        },
       );
     }, VALIDATE_DELAY_MS);
     return () => clearTimeout(timer);
-  }, [doc?.model]);
+  }, [doc?.model, recheck]);
+  const checkFailed = Boolean(validation.failed);
+  const checked = !checkFailed && doc !== null && validation.modelJson === modelJson;
 
   // A draft is written once the model differs from what was loaded, and removed only by a save that
   // reaches the file or by "Discard them": closing the restore dialog, or editing back to the
-  // loaded state, keeps it. Nothing is written while the restore question is open, so the stored
-  // draft is still there whatever the answer. A layout effect, so the draft is stored before the
-  // edit is even painted, and a tab closed right after typing loses nothing.
+  // loaded state, keeps it. A new or imported definition is stored at once, since the browser is
+  // the only place it exists until it is saved; the file list offers it again. Nothing is written
+  // while the restore question is open, so the stored draft is still there whatever the answer. A
+  // layout effect, so the draft is stored before the edit is even painted, and a tab closed right
+  // after typing loses nothing. It also runs when a save answers: a save removes the draft, and
+  // edits made while it was on its way are stored again.
   const restorePending = dialog?.type === "restore";
   useLayoutEffect(() => {
-    if (doc && workspace && !restorePending && JSON.stringify(doc.model) !== doc.loadedJson) {
+    if (doc && workspace && !restorePending && (doc.isNew || modelJson !== doc.loadedJson)) {
       writeDraft(workspace.workspace, doc.file, {
         model: doc.model,
         designerData: doc.designerData,
+        isNew: doc.isNew,
+        format: doc.format,
+        warnings: doc.warnings,
         savedAt: Date.now(),
       });
     }
-  }, [doc?.model, restorePending]);
+  }, [doc?.model, doc?.loadedJson, doc?.isNew, restorePending]);
 
   /** Shows the file list, leaving the open document behind. */
   const close = () => {
@@ -163,6 +209,36 @@ function App() {
       close();
       setFilesError(error.message);
     }
+  };
+
+  const openDraft = (file) => {
+    const draft = workspace && readDraft(workspace.workspace, file);
+    if (!draft) {
+      setDraftsChanged((count) => count + 1);
+      return;
+    }
+    load({
+      file,
+      format: draft.format ?? (file.endsWith(".json") ? "JSON" : "YAML"),
+      model: draft.model,
+      designerData: draft.designerData ?? { sampleInput: null, steps: {} },
+      baseSha: null,
+      warnings: draft.warnings ?? [],
+      isNew: true,
+    });
+  };
+
+  const discardDraft = (file) => {
+    const draft = readDraft(workspace.workspace, file);
+    writeDraft(workspace.workspace, file, null);
+    setDraftsChanged((count) => count + 1);
+    notify(`Discarded ${file}.`, {
+      label: "Undo",
+      run: () => {
+        writeDraft(workspace.workspace, file, draft);
+        setDraftsChanged((count) => count + 1);
+      },
+    });
   };
 
   const newFile = (name, fileName) =>
@@ -292,8 +368,11 @@ function App() {
   if (!doc) {
     return html`<${FilesView}
         workspace=${workspace}
+        drafts=${workspace ? browserOnlyDrafts(workspace) : []}
         error=${filesError}
         onOpen=${openFile}
+        onOpenDraft=${openDraft}
+        onDiscardDraft=${discardDraft}
         onNew=${newFile}
         onImport=${importFile}
       />
@@ -359,14 +438,29 @@ function App() {
             edit((m) => Object.assign(m, withField(m, "version", version)));
           }} />
         <span class="chip neutral" title="The definition's mode">${model.mode ?? "SAGA"}</span>
-        <button
-          type="button"
-          class=${"chip " + (count ? "err" : "ok")}
-          aria-label=${count ? `${count} problems; show the first` : "No problems"}
-          onClick=${showFirstProblem}
-        >
-          ${count ? html`${icons.error} ${count} ${count === 1 ? "problem" : "problems"}` : html`${icons.ok} Valid`}
-        </button>
+        ${checkFailed
+          ? html`<button
+              type="button"
+              class="chip err"
+              title=${validation.failed}
+              aria-label="The check failed; check again"
+              onClick=${() => {
+                setValidation((previous) => ({ ...previous, failed: null }));
+                setRecheck((n) => n + 1);
+              }}
+            >
+              ${icons.error} Check failed
+            </button>`
+          : !checked
+            ? html`<span class="chip neutral" role="status">Checking…</span>`
+            : html`<button
+                type="button"
+                class=${"chip " + (count ? "err" : "ok")}
+                aria-label=${count ? `${count} problems; show the first` : "No problems"}
+                onClick=${showFirstProblem}
+              >
+                ${count ? html`${icons.error} ${count} ${count === 1 ? "problem" : "problems"}` : html`${icons.ok} Valid`}
+              </button>`}
       </div>
       <div class="top-actions">
         <button
@@ -375,7 +469,9 @@ function App() {
           onClick=${() => {
             close();
             refreshWorkspace();
-            if (dirty) {
+            if (doc.isNew) {
+              notify(`${doc.file} is kept in this browser until you save it; it is listed under "Not saved yet".`);
+            } else if (dirty) {
               notify("Your unsaved changes are kept in this browser; open the file again to restore them.");
             }
           }}
@@ -388,7 +484,7 @@ function App() {
         </button>
       </div>
     </header>
-    ${validation.sameVersion &&
+    ${checked && validation.sameVersion &&
     html`<div class="banner warn" role="status">
       <p>
         The content changed but the version did not. A server that has registered this version
@@ -421,7 +517,7 @@ function App() {
               model=${model}
               index=${index}
               problems=${problemsByStep.get(selectedId) ?? []}
-              keys=${keysBefore(model, index)}
+              keysFor=${(phase) => keysFor(model, index, phase)}
               services=${workspace?.services ?? []}
               onChange=${(step) => edit((m) => { m.steps[index] = step; })}
               onDelete=${deleteStep}
@@ -437,8 +533,9 @@ function App() {
     ${dialog?.type === "export" &&
     html`<${ExportDialog}
       model=${model}
-      definitionText=${validation.definition}
+      definitionText=${checked ? validation.definition : ""}
       problemCount=${count}
+      checkState=${checkFailed ? "failed" : checked ? "checked" : "checking"}
       defaultFormat=${doc.format}
       onClose=${() => setDialog(null)}
       onError=${(error) => notify(error.message)}

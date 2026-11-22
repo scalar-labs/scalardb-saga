@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.options.AriaRole;
 import com.scalar.db.saga.designer.DefinitionFormats.Format;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class EditorUiTest extends UiTestSupport {
@@ -369,7 +370,7 @@ class EditorUiTest extends UiTestSupport {
   }
 
   @Test
-  void keysBefore_laterCaptureOfTheSameKey_replacesTheEarlierOne() throws Exception {
+  void keysFor_laterCaptureOfTheSameKey_replacesTheEarlierOne() throws Exception {
     // Arrange
     page.navigate(url());
 
@@ -378,18 +379,57 @@ class EditorUiTest extends UiTestSupport {
         page.evaluate(
             """
             async () => {
-              const { keysBefore } = await import("/context.js");
+              const { keysFor } = await import("/context.js");
               const call = (name, value) => ({ output: [{ name, value }] });
               const model = { steps: [
                 { name: "a", phases: { execution: call("id", "$.a"), compensation: call("x", "$.x") } },
                 { name: "b", phases: { execution: call("id", "$.b") } },
                 { name: "c", phases: { execution: call("other", "$.c") } },
               ] };
-              return keysBefore(model, 2);
+              return keysFor(model, 2, "execution");
             }
             """);
 
     // Assert
     assertThat(String.valueOf(keys)).isEqualTo("[{key=id, from=b}]");
   }
+
+  @Test
+  void keysFor_tccReservation_offersOnlyEarlierReservations() throws Exception {
+    // Arrange
+    page.navigate(url());
+
+    // Act
+    Object keys = page.evaluate(TCC_KEYS, List.of(1, "reservation"));
+
+    // Assert
+    assertThat(String.valueOf(keys)).isEqualTo("[{key=hold, from=a}]");
+  }
+
+  @Test
+  void keysFor_tccConfirmation_offersEveryReservationAndEarlierConfirmations() throws Exception {
+    // Arrange
+    page.navigate(url());
+
+    // Act
+    Object keys = page.evaluate(TCC_KEYS, List.of(1, "confirmation"));
+
+    // Assert
+    assertThat(String.valueOf(keys))
+        .isEqualTo("[{key=hold, from=a}, {key=seat, from=b}, {key=done, from=a}]");
+  }
+
+  /** The keys for a call of two TCC steps that each capture a key in both forward phases. */
+  private static final String TCC_KEYS =
+      """
+      async ([index, phase]) => {
+        const { keysFor } = await import("/context.js");
+        const call = (name) => ({ output: [{ name, value: "$." + name }] });
+        const model = { mode: "TCC", steps: [
+          { name: "a", phases: { reservation: call("hold"), confirmation: call("done") } },
+          { name: "b", phases: { reservation: call("seat"), confirmation: call("paid") } },
+        ] };
+        return keysFor(model, index, phase);
+      }
+      """;
 }

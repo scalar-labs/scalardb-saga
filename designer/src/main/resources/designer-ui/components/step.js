@@ -6,7 +6,7 @@ import { icons } from "./icons.js";
 import { RetryFields } from "./retry.js";
 
 /** The editor of the selected step. */
-export function StepEditor({ model, index, problems, keys, services, onChange, onDelete, onDuplicate }) {
+export function StepEditor({ model, index, problems, keysFor, services, onChange, onDelete, onDuplicate }) {
   const step = model.steps[index];
   const set = (key, value) => onChange(withField(step, key, value));
   const head = html`<div class="ed-acts">
@@ -58,7 +58,7 @@ export function StepEditor({ model, index, problems, keys, services, onChange, o
         stepName=${step.name || "step"}
         phase=${phase}
         call=${step.phases[phase] ?? null}
-        keys=${keys}
+        keys=${keysFor(phase)}
         onChange=${(call) =>
           onChange({
             ...step,
