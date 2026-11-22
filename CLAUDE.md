@@ -15,13 +15,14 @@ Refer to `~/git/scalardb-saga-design/docs/scalardb-saga-design.md` for architect
 - **Gradle 9.x with Kotlin DSL** (`build.gradle.kts`)
 - Format apply: `./gradlew spotlessApply`
 - Check (test + format + static analysis): `./gradlew check`
-- Check for compiler warnings (hidden when cached): `./gradlew clean compileTestJava compileTestFixturesJava compileIntegrationTestJava --no-build-cache`
-  - **Expected baseline: exactly 4 warnings** — `unknown enum constant ElementType.MODULE` twice each from `:api:compileJava` and `:client:compileJava`. The Java 8 modules carry jspecify annotations whose class files name the Java-9-only `MODULE` target, and javac has no switch to suppress the resulting note. They go away only if those modules ever leave Java 8. The count covers every Java source set: `main`, `test`, `testFixtures` and `integrationTest`. It does **not** cover `javadoc`, which `check` also runs with `-Werror` on every module, so a doclint warning anywhere fails the build outright rather than counting here. Any warning beyond these 4 is new and must be fixed.
-- **Always run all three in order (`spotlessApply` → `check` → `clean compileTestJava compileTestFixturesJava compileIntegrationTestJava --no-build-cache`) before confirming code changes are OK**
+- Check for compiler warnings (hidden when cached): `./gradlew clean compileTestJava compileTestFixturesJava compileIntegrationTestJava compileUiTestJava --no-build-cache`
+  - **Expected baseline: exactly 4 warnings** — `unknown enum constant ElementType.MODULE` twice each from `:api:compileJava` and `:client:compileJava`. The Java 8 modules carry jspecify annotations whose class files name the Java-9-only `MODULE` target, and javac has no switch to suppress the resulting note. They go away only if those modules ever leave Java 8. The count covers every Java source set: `main`, `test`, `testFixtures`, `integrationTest` and the designer's `uiTest`. It does **not** cover `javadoc`, which `check` also runs with `-Werror` on every module, so a doclint warning anywhere fails the build outright rather than counting here. Any warning beyond these 4 is new and must be fixed.
+- **Always run all three in order (`spotlessApply` → `check` → `clean compileTestJava compileTestFixturesJava compileIntegrationTestJava compileUiTestJava --no-build-cache`) before confirming code changes are OK**
 - Gradle's exit status is lost through a pipe (`./gradlew check | tail` reports tail's status, so `&&` chains continue past a failed build) — redirect to a file with `>|` (plain `>` is blocked by zsh noclobber) and test `$?` before committing
 - **Convention plugins** in `build-logic/` — shared build logic lives here, not in `subprojects {}` / `allprojects {}`
 - **Version catalog** in `gradle/libs.versions.toml` — single source of truth for dependency versions
 - **Configuration cache** enabled (`org.gradle.configuration-cache=true`)
+- The designer's browser tests are a separate `uiTest` suite (Playwright for Java, Chromium only), run with `./gradlew :designer:uiTest` and not by `check`, which only compiles and analyses them. The browser build is downloaded into the git-ignored `.gradle/ms-playwright`
 - Integration tests run on a private SQLite file per test. `-Dscalardb.saga.integration_test.properties=<ScalarDB properties file>` (absolute, or relative to the repository root) points both suites at any other backend (`IntegrationTestStore` in `core`'s test fixtures; the file carries the same store keys a deployment would, such as `scalar.db.saga.store.scalardb.creation_options.no-scaling=true` for DynamoDB Local). Run `:core:integrationTest` and `:server:integrationTest` in **separate** invocations then: the configuration cache keeps task parallelism on regardless of `--no-parallel`, and two suites truncating one shared store wipe each other mid-test
 - New subprojects apply `id("scalardb-saga.java-conventions")` and declare only their specific dependencies
 
@@ -129,6 +130,7 @@ See [server/docker/README.md](server/docker/README.md) for running it.
 - **GitHub Actions** (`.github/workflows/ci.yml`) — on push to `main` and the release branches, and on every PR:
   - `check` — `./gradlew check` (`test` + `integrationTest` + `javadoc` + `spotlessCheck` + `spotbugsMain` + Error Prone), then a no-build-cache compile to surface warnings
   - `dockerfile-lint` — hadolint over `server/docker/Dockerfile`
+  - `designer-ui-test` — `:designer:uiTest`, the designer's Playwright browser tests, with the Chromium build cached
   - `image-smoke-test` — builds the image and runs it against SQLite, asserting health on both transports, non-root uid, `INFO` logging, a clean `SIGTERM` drain, and that the epoll native transport actually loaded (a silent NIO fallback keeps the server healthy, so `/proc/1/maps` is the evidence)
   - `image-arm64-native-test` — the same boot under QEMU on `linux/arm64`, asserting the `aarch_64` epoll native loads; only `linux-x86_64` arrives transitively, so nothing else catches a dropped classifier
   - Both smoke jobs boot from the shared fixture in `.github/smoke/`
