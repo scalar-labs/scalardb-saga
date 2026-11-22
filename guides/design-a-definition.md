@@ -88,8 +88,8 @@ as a tree.
 - **The whole body, as text,** captures `$body`, which also works for a response that is not JSON.
 - Fields the engine cannot read are shown with the reason: items of a list, and fields whose name
   contains a dot.
-- An output row whose field is missing from the sample, or is null there, is flagged: a response like
-  that fails the step.
+- An output row whose field is missing from the sample, or is null or holds a null there, is
+  flagged: a response like that fails the step.
 
 You can also type output rows by hand when you have no sample. The samples are saved beside the
 definition, in `.designer/`, and are never part of the definition.

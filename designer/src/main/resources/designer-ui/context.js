@@ -61,8 +61,9 @@ function ownForwardPhase(model) {
   return model.mode === "TCC" ? "reservation" : "execution";
 }
 
+/** The keys a call's output captures, exactly as written: the engine does not trim them. */
 function outputKeys(call) {
-  return (call?.output ?? []).map((row) => (row.name ?? "").trim()).filter((key) => key !== "");
+  return (call?.output ?? []).map((row) => row.name ?? "").filter((key) => key !== "");
 }
 
 /**
@@ -113,7 +114,8 @@ export function referencedKeys(call) {
     }
     if (value.kind === "context" && value.key) {
       keys.add(value.key);
-    } else if (value.kind === "template") {
+    } else if (value.kind === "template" || (value.kind === "fixed" && value.type === "string")) {
+      // The engine resolves ${key} in every string of a JSON body, a fixed one too.
       scan(value.text);
     } else if (value.kind === "object") {
       value.fields.forEach((field) => walk(field.value));
@@ -270,7 +272,15 @@ export function sampleHas(sample, expression) {
     }
     current = current[segment];
   }
-  return current !== null;
+  return !holdsNull(current);
+}
+
+/** Whether a value is null or holds a null at any depth: the engine refuses such output. */
+function holdsNull(value) {
+  if (value === null) {
+    return true;
+  }
+  return typeof value === "object" && Object.values(value).some(holdsNull);
 }
 
 /** A sample response's text parsed as JSON, or null with the reason when it is not JSON. */

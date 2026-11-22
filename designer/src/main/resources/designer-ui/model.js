@@ -137,6 +137,22 @@ export function withField(object, key, value) {
   return { ...object, [key]: value, extras: (object.extras ?? []).filter((extra) => extra.name !== key) };
 }
 
+/**
+ * The object with a field cleared, together with any value of it kept in extras because the form
+ * could not hold it, such as a pivot written as "yes".
+ */
+export function withoutField(object, key) {
+  return { ...object, [key]: null, extras: (object.extras ?? []).filter((extra) => extra.name !== key) };
+}
+
+/** The field's value in words, from the form or as kept in extras, or null when it has none. */
+function fieldText(object, key) {
+  if (object[key] !== null && object[key] !== undefined) {
+    return String(object[key]);
+  }
+  return (object.extras ?? []).find((extra) => extra.name === key)?.json ?? null;
+}
+
 /** A step that is a class step or not an object at all: shown, kept, but not edited. */
 export function isReadOnly(step) {
   return "raw" in step || (step.stepClass !== null && step.stepClass !== undefined);
@@ -204,7 +220,10 @@ export function pivotIndex(model) {
  * default, leaves the field out.
  */
 export function setRecoveryStrategy(model, strategy) {
-  Object.assign(model, withField(model, "recoveryStrategy", strategy === "BACKWARD" ? null : strategy));
+  Object.assign(
+    model,
+    strategy === "BACKWARD" ? withoutField(model, "recoveryStrategy") : withField(model, "recoveryStrategy", strategy),
+  );
   const steps = model.steps ?? [];
   if (strategy === "MIXED") {
     if (pivotIndex(model) < 0 && steps.length > 0) {
@@ -218,8 +237,13 @@ export function setRecoveryStrategy(model, strategy) {
 /** Marks one step as the pivot and clears the mark on every other, in place; -1 clears them all. */
 export function setPivot(model, index) {
   (model.steps ?? []).forEach((step, i) => {
-    if (step && !("raw" in step) && (i === index || step.pivot !== null)) {
-      Object.assign(step, withField(step, "pivot", i === index ? true : null));
+    if (!step || "raw" in step) {
+      return;
+    }
+    if (i === index) {
+      Object.assign(step, withField(step, "pivot", true));
+    } else if (fieldText(step, "pivot") !== null) {
+      Object.assign(step, withoutField(step, "pivot"));
     }
   });
 }
@@ -262,10 +286,11 @@ const MODE_PHASES = {
 export function switchMode(model, mode) {
   const dropped = [];
   if (mode === "TCC") {
-    if (model.recoveryStrategy !== null && model.recoveryStrategy !== undefined) {
-      dropped.push(`the recovery strategy ${model.recoveryStrategy}`);
+    const strategy = fieldText(model, "recoveryStrategy");
+    if (strategy !== null) {
+      dropped.push(`the recovery strategy ${strategy}`);
+      Object.assign(model, withoutField(model, "recoveryStrategy"));
     }
-    Object.assign(model, withField(model, "recoveryStrategy", null));
   }
   for (const step of model.steps ?? []) {
     if (!step || "raw" in step) {
@@ -273,9 +298,9 @@ export function switchMode(model, mode) {
     }
     const name = step.name || "a step";
     // A class step keeps its phases, but its pivot mark goes like any other: TCC has no pivot.
-    if (mode === "TCC" && step.pivot !== null && step.pivot !== undefined) {
+    if (mode === "TCC" && fieldText(step, "pivot") !== null) {
       dropped.push(`the pivot mark on ${name}`);
-      Object.assign(step, withField(step, "pivot", null));
+      Object.assign(step, withoutField(step, "pivot"));
     }
     if (isReadOnly(step)) {
       continue;

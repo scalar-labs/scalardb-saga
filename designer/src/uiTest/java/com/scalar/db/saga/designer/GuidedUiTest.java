@@ -221,7 +221,7 @@ class GuidedUiTest extends UiTestSupport {
   }
 
   @Test
-  void sampleHas_inheritedPropertyName_isMissing() throws Exception {
+  void sampleHas_inheritedNameOrNestedNull_isMissing() throws Exception {
     // Arrange
     page.navigate(url());
 
@@ -231,12 +231,17 @@ class GuidedUiTest extends UiTestSupport {
             """
             async () => {
               const { sampleHas } = await import("/context.js");
-              return [sampleHas({}, "$.constructor"), sampleHas({ a: { b: 1 } }, "$.a.b")];
+              return [
+                sampleHas({}, "$.constructor"),
+                sampleHas({ a: { b: 1 } }, "$.a.b"),
+                sampleHas({ items: [null] }, "$.items"),
+                sampleHas({ a: { b: { c: null } } }, "$.a"),
+              ];
             }
             """);
 
     // Assert
-    assertThat(String.valueOf(has)).isEqualTo("[false, true]");
+    assertThat(String.valueOf(has)).isEqualTo("[false, true, false, false]");
   }
 
   @Test
@@ -266,6 +271,67 @@ class GuidedUiTest extends UiTestSupport {
         .isEqualTo(
             "[[the reservation call of a, replaced by its execution, the pivot mark on b], /a,"
                 + " null]");
+  }
+
+  @Test
+  void keys_outputNameWithSpacesAndFixedStringWithAKey_matchTheEngine() throws Exception {
+    // Arrange
+    page.navigate(url());
+
+    // Act
+    Object result =
+        page.evaluate(
+            """
+            async () => {
+              const { keysFor, referencedKeys } = await import("/context.js");
+              const model = { steps: [
+                { name: "a", phases: { execution: { output: [{ name: " id ", value: "$.id" }] } } },
+                { name: "b", phases: { execution: {} } },
+              ] };
+              const fixed = { jsonBody: { kind: "object", fields: [
+                { name: "c", value: { kind: "fixed", type: "string", text: "x-${customerId}" } },
+                { name: "n", value: { kind: "fixed", type: "number", text: "1" } },
+              ] } };
+              return [keysFor(model, 1, "execution").map((key) => key.key), [...referencedKeys(fixed)]];
+            }
+            """);
+
+    // Assert
+    assertThat(String.valueOf(result)).isEqualTo("[[ id ], [customerId]]");
+  }
+
+  @Test
+  void clearing_mistypedRecoveryStrategyAndPivot_dropsTheKeptValuesToo() throws Exception {
+    // Arrange
+    page.navigate(url());
+
+    // Act
+    Object result =
+        page.evaluate(
+            """
+            async () => {
+              const { setPivot, setRecoveryStrategy, switchMode } = await import("/model.js");
+              const model = () => ({ mode: "SAGA", recoveryStrategy: null,
+                extras: [{ name: "recoveryStrategy", json: "5" }],
+                steps: [
+                  { name: "a", pivot: null, phases: {}, extras: [{ name: "pivot", json: "\\"yes\\"" }] },
+                  { name: "b", pivot: null, phases: {}, extras: [] },
+                ] });
+              const extras = (m) => [m.extras.length, ...m.steps.map((step) => step.extras.length)];
+              const switched = model();
+              const dropped = switchMode(switched, "TCC");
+              const backward = model();
+              setRecoveryStrategy(backward, "BACKWARD");
+              const moved = model();
+              setPivot(moved, 1);
+              return [dropped, extras(switched), extras(backward)[0], extras(moved), moved.steps[1].pivot];
+            }
+            """);
+
+    // Assert
+    assertThat(String.valueOf(result))
+        .isEqualTo(
+            "[[the recovery strategy 5, the pivot mark on a], [0, 0, 0], 0, [1, 0, 0], true]");
   }
 
   @Test

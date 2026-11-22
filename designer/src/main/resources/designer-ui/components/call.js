@@ -89,7 +89,7 @@ export function CallEditor({ stepName, phase, call, onChange, keys, neverRuns, s
       valuePlaceholder="$.payment_id"
       hint="Each row puts a value from the response body into the saga context under its key: $.field, $.a.b, or $body for the whole body as text."
       flag=${(row) =>
-        sampleHas(parsed, row.value) === false ? "Missing from the sample response, or null there: the step fails when the response is like that." : null}
+        sampleHas(parsed, row.value) === false ? "Missing from the sample response, or null in it: the step fails when the response is like that." : null}
       onChange=${(rows) => set("output", rows)}
     />`}
     ${sample !== undefined &&
