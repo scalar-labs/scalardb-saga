@@ -18,8 +18,10 @@
 # effective database concurrency is capped at the number of carriers. Interim releases stop receiving
 # patches the moment the next one ships, so only LTS majors are candidates.
 #
-# Ubuntu resolute (26.04) underneath because it is the current Ubuntu LTS. Like the JRE major, moving
-# to the next one is a deliberate manual change.
+# The Java major version is part of the base image name (jre25), so Dependabot does not propose Java
+# major version upgrades; moving to the next LTS is a manual change of the image name. The Ubuntu
+# release underneath is not named here because the base image chooses it: the tag carries only the
+# JRE version and a build timestamp, so a move to another release would arrive as a tag bump.
 #
 # Scalar managed base image:
 # - https://github.com/orgs/scalar-labs/packages/container/package/jre25
