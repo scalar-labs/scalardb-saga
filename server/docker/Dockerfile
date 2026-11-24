@@ -29,21 +29,13 @@
 #   docker buildx imagetools inspect ghcr.io/scalar-labs/jre25:<TAG>
 FROM ghcr.io/scalar-labs/jre25:25.0.5_8.202611200209@sha256:2f153434ef83a32558f62d2dda9bbbdebd8426c774881d5e26c6b5f3896459ab
 
-# Two things in one layer, since each `RUN` is a layer and neither is worth its own:
+# Create a fixed numeric uid/gid, matching the convention the other Scalar server images use, so a
+# Kubernetes runAsNonRoot admission check passes without a passwd lookup and any mounted volume's
+# ownership stays predictable across upgrades. The account gets nologin as its shell: nothing ever
+# logs in as the daemon user, so a real shell would serve only an attacker who reaches it.
 #
-# 1. Upgrade the OS packages. The base image is rebuilt on its own cadence, so at any moment it can
-#    carry packages whose CVEs are already fixed upstream; upgrading at build time closes that window
-#    without waiting for a base image respin. hadolint flags apt-get upgrade (DL3005) as making builds
-#    non-deterministic — which is the intent, and the digest pin above fixes the starting point.
-#    DEBIAN_FRONTEND=noninteractive makes any package whose configuration asks a question take its
-#    default instead of waiting on a prompt no build has a TTY to answer. It is exported inside the
-#    RUN rather than set with ENV so it stays out of the runtime image.
-# 2. Create a fixed numeric uid/gid, matching the convention the other Scalar server images use, so a
-#    Kubernetes runAsNonRoot admission check passes without a passwd lookup and any mounted volume's
-#    ownership stays predictable across upgrades. The account gets nologin as its shell: nothing ever
-#    logs in as the daemon user, so a real shell would serve only an attacker who reaches it.
-#
-# hadolint ignore=DL3005
+# No apt-get upgrade here: OS packages are upgraded in the Scalar managed base image, and each of its
+# releases reaches this file as a Dependabot bump of the tag and digest above.
 RUN groupadd --system --gid 201 scalardb \
  && useradd --system --uid 201 --gid 201 --no-create-home --shell /usr/sbin/nologin scalardb
 
