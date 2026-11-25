@@ -20,7 +20,7 @@
 #
 # Ubuntu resolute (26.04) underneath because it is the current Ubuntu LTS. Like the JRE major, moving
 # to the next one is a deliberate manual change.
-FROM eclipse-temurin:25.0.5_8-jre-resolute@sha256:b6e00330337143a2c1a20f1c1c693d4b6ce9a3c30ade8b9d03fc68cc9e3871e7
+FROM eclipse-temurin:25.0.5.1_2-jre-resolute@sha256:a0862ac8790c648f6b5db8a113b9990d24fbe8e65f3c4ba8d68b0302d270c1e6
 
 # Two things in one layer, since each `RUN` is a layer and neither is worth its own:
 #
