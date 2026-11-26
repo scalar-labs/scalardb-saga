@@ -157,5 +157,4 @@ The flow, for people and agents alike, is in [RELEASING.md](RELEASING.md#changel
 
 ## TODO
 
-- [ ] Verify the release workflow end to end on the first tag (Maven Central credentials and the ghcr push are untested)
 - [ ] Add the UBI variant of the server image if Red Hat Marketplace / OpenShift certification is needed
