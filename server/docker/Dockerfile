@@ -27,7 +27,7 @@
 # - https://github.com/orgs/scalar-labs/packages/container/package/jre25
 # You can confirm the digest with:
 #   docker buildx imagetools inspect ghcr.io/scalar-labs/jre25:<TAG>
-FROM ghcr.io/scalar-labs/jre25:25.0.5_8.202611200209@sha256:2f153434ef83a32558f62d2dda9bbbdebd8426c774881d5e26c6b5f3896459ab
+FROM ghcr.io/scalar-labs/jre25:25.0.5.1_2.202611240717@sha256:f52c453d60729a68f033bdd9b692e0539e18a5e6c6e06861abee379ce49aaf7f
 
 # Create a fixed numeric uid/gid, matching the convention the other Scalar server images use, so a
 # Kubernetes runAsNonRoot admission check passes without a passwd lookup and any mounted volume's
