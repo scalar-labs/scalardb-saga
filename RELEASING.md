@@ -212,7 +212,7 @@ git tag v<version> && git push origin v<version>
    default as well as `gradle.properties`, as in step 2; CI fails a pull request where the two
    disagree.
 
-   A newly cut branch also needs two pieces of update plumbing.
+   A newly cut branch also needs three pieces of update plumbing.
 
    First, the line needs its `ScalarDB <version>` GitHub project. The projects are shared across
    the ScalarDB family — the same numbering, the same objects `scalardb` and `scalardb-cluster`
@@ -233,6 +233,14 @@ git tag v<version> && git push origin v<version>
    again when that line reaches end of life. Dependabot reads the file from the default branch
    only, so a line gets no workflow updates until an entry names it. Copy the whole entry rather
    than retyping it, so the `groups:` block comes along.
+
+   Third, the line needs its vulnerability scan. **On `main`, through a pull request**, add a job
+   for the branch to
+   [.github/workflows/scheduled-vuln-check.yml](.github/workflows/scheduled-vuln-check.yml),
+   copying an existing release-line job and substituting the branch in its `uses:` ref and
+   `target-ref`, and delete it again when the line reaches end of life. A schedule fires on the
+   default branch only, so a line is never scanned until a job there names it. The job scans the
+   line's latest release, so it only succeeds once that line has one.
 
    A repository ruleset covering version branches is worth having before one is cut, for the same
    reason `main` has one: a release is built from the commit the tag names, and the workflow's check
