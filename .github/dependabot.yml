@@ -60,20 +60,15 @@ updates:
   # merged here (see the release-branch section below). When a Dockerfile is added anywhere else,
   # list its directory here: Dependabot reads nothing it is not pointed at. There is no `groups:`
   # block while this is the only Dockerfile: a group with one member only replaces "bump
-  # eclipse-temurin from X to Y" in the PR title with the name of the group. Add one as soon as a
+  # scalar-labs/jre25 from X to Y" in the PR title with the name of the group. Add one as soon as a
   # second Dockerfile is listed, so a base-image respin stays one PR instead of one per directory.
+  # There is no `ignore:` rule for major versions either: the Java major version is part of the JRE
+  # base image name (jre25), so Dependabot does not propose Java major version upgrades. Moving to
+  # the next LTS is a manual change of the image name.
   - package-ecosystem: docker
     directories: ["/server/docker"]
     schedule:
       interval: weekly
-    ignore:
-      # Only the LTS majors (21, 25, ...) keep receiving patches; the six-month interim releases die
-      # the moment the next one ships, so a major bump would usually land the image on an
-      # already-dead JRE. Moving to the next LTS is a deliberate manual change. The digest updates
-      # that deliver each security rebuild of the current tag are a different update type, which this
-      # rule does not touch.
-      - dependency-name: "eclipse-temurin"
-        update-types: ["version-update:semver-major"]
 
   # --- Release branches: github-actions only ---
   # Gradle and Docker bumps deliberately have no target-branch copies: they land on main once and
