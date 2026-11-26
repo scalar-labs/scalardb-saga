@@ -47,9 +47,9 @@ runs:
       shell: bash
       run: ./gradlew :server:dockerContext
 
-    # The arm64 leg has to execute the Dockerfile's apt and useradd steps, which are native
-    # instructions — hence emulation. The payload itself is architecture-independent Java, so this
-    # only pays for a handful of package operations. If the emulated leg becomes slow enough to
+    # The arm64 leg has to execute the Dockerfile's groupadd and useradd step, which runs native
+    # binaries — hence emulation. The payload itself is architecture-independent Java, so this
+    # only pays for those two commands. If the emulated leg becomes slow enough to
     # matter, the faster arrangement is a matrix over ubuntu-latest and ubuntu-24.04-arm that pushes
     # by digest, plus a job that merges them into one manifest list.
     - name: Set up QEMU
