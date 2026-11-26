@@ -1,0 +1,5 @@
+kind: improvement
+body: A HEAD request to a GET route other than `/health` now returns the GET's status and content type, without a body, and needs the same credential and role; it used to get 405.
+time: 2026-11-09T11:29:32.715349+09:00
+custom:
+    PR: "239"
