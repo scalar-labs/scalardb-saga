@@ -1,0 +1,5 @@
+kind: bugfix
+body: The ScalarDB Saga Server container image is now based on Scalar's managed JRE image, `ghcr.io/scalar-labs/jre25`, instead of `eclipse-temurin`. OS package security fixes now arrive with each update of that base image, rather than from an upgrade run while the server image is built.
+time: 2026-11-26T20:14:40.118189+09:00
+custom:
+    PR: "254"
