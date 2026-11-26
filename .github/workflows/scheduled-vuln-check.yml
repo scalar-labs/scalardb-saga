@@ -1,0 +1,28 @@
+name: Scheduled vulnerability check
+
+# A schedule fires on the default branch only, so this one file covers every maintained line. Each
+# job calls vuln-check.yml as that line's branch carries it. main scans its head; a release line
+# scans its latest release, the image users actually run. Add a job when a release branch is cut and
+# remove it when the line reaches end of life.
+on:
+  schedule:
+    - cron: "0 21 * * TUE,FRI" # UTC, the same slots as the other ScalarDB repositories
+
+permissions:
+  contents: read
+
+jobs:
+  main:
+    uses: scalar-labs/scalardb-saga/.github/workflows/vuln-check.yml@main
+    with:
+      target-ref: main
+    secrets:
+      SLACK_SECURITY_WEBHOOK_URL: ${{ secrets.SLACK_SECURITY_WEBHOOK_URL }}
+
+  v3_20:
+    uses: scalar-labs/scalardb-saga/.github/workflows/vuln-check.yml@3.20
+    with:
+      target-ref: v3.20
+      find-latest-release: true
+    secrets:
+      SLACK_SECURITY_WEBHOOK_URL: ${{ secrets.SLACK_SECURITY_WEBHOOK_URL }}
