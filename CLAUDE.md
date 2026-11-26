@@ -102,6 +102,7 @@ Subproject directories use short names; artifacts are prefixed with `scalardb-sa
 - `client` — Java 8 daemon client SDK, published as `scalardb-saga-java-client-sdk`
 - `server` — Standalone server (REST + gRPC); ships as a container image, not a Maven artifact
 - `bom` — `java-platform` BOM pinning every published artifact to one version
+- `designer` — Saga definition designer: a local process serving a browser editor for declarative definitions in a folder; not published (run with `./gradlew :designer:run --args="--workspace <dir>"`)
 - Future: `spring`, `quarkus`, `participant`, `dev-server`, `lra`
 
 There is no HTTP client SDK and none is planned: the daemon's REST API exists so non-Java consumers can skip an SDK entirely, and a Java HTTP SDK would serve the same Java 8 audience over a slower transport.
